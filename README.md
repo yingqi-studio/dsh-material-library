@@ -20,13 +20,11 @@ A material library for [DeepSeek Harness](https://github.com/deepseek-ai/deepsee
 
 ## Install
 
-From npm (once published) or straight from GitHub:
-
 ```sh
 dsh plugin --profile <your-profile> add dsh-material-library
-# or, before it is on npm:
-dsh plugin --profile <your-profile> add github:yingqi-studio/dsh-material-library
 ```
+
+Published on npm as [`dsh-material-library`](https://www.npmjs.com/package/dsh-material-library); installing straight from GitHub also works: `dsh plugin --profile <your-profile> add github:yingqi-studio/dsh-material-library`.
 
 In DSH Desktop, open **Plugins**, search the name, and install it there. Restart `dsh web` (or refresh the page) and the library appears as an icon in the sidebar.
 
