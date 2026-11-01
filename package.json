@@ -39,8 +39,7 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
-    "LICENSE",
-    "docs/*.png"
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
