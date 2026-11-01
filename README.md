@@ -15,6 +15,9 @@ A material library for [DeepSeek Harness](https://github.com/deepseek-ai/deepsee
 - **Read like a chat.** Markdown is rendered with the typography of conversation messages — headings, nested lists, quotes, code blocks, tables, rules — including when the entry is a reference to a file outside the library.
 - **Reopen the source.** For a collected entry, `Open in original session` switches to that conversation and opens the folder in its right sidebar.
 - **Everything is editable.** Rename or delete a folder or tag from the sidebar (a tag rename rewrites it everywhere; a folder rename moves its files), edit name/folder/tags of any entry, search names, bodies and tags.
+- **Version history.** Every save keeps the previous body under `.history/` (up to 30 per file). Open `Versions` in the detail header, read any version in the pane, and restore it — restoring snapshots the current body first, so a restore is undoable. Notes kept: refs and folders have no versions.
+- **Copy a reference into the library.** A collected entry can be turned into a real file inside the library (`收进库 / Copy into library`); the original is untouched.
+- **Import a tree.** `/import` copies a file or a directory from anywhere inside your home directory into the library (up to 2000 files per call), reusing the same collision-safe naming.
 
 ![Collect dialog](docs/collect-dialog.png)
 
@@ -63,6 +66,11 @@ The UI talks to the host over same-origin JSON routes under `/api/dsh-materials`
 | POST | `/tag/rename` `/tag/delete` | tags |
 | POST | `/ref/add` `/ref/update` `/ref/delete` | collected references |
 | POST | `/open` | open / reveal a target with the OS |
+| GET | `/versions?path=` | saved versions of a note (id, time, size) |
+| GET | `/version?path=&id=` | read one saved version |
+| POST | `/restore` | restore a version (snapshots the current body first) |
+| POST | `/ref/copy` | copy a collected reference into the library as a real file |
+| POST | `/import` | copy a file or directory from inside the home directory into the library |
 
 Everything that mutates goes through one serialized store; conflicts (duplicate name, non-empty folder, unknown application) come back as readable 4xx errors.
 
@@ -72,7 +80,7 @@ Everything that mutates goes through one serialized store; conflicts (duplicate 
 - Only targets inside your home directory can be collected.
 - Files you drop into the library by hand are listed but have no tags until you tag them in the UI.
 - The Markdown renderer is built in (~150 lines, no dependency): it covers common syntax but not inline HTML, footnotes or task-list checkboxes.
-- No agent tools yet — everything is done in the UI.
+- No agent tools yet — everything is done in the UI. Versions exist for notes, not for references or folders.
 
 ## 中文说明
 
@@ -85,6 +93,9 @@ Everything that mutates goes through one serialized store; conflicts (duplicate 
 - **像对话一样阅读**：标题、嵌套列表、引用、代码块、表格、分隔线，引用外部文件时同样渲染。
 - **在原始会话右侧打开**：切回那个对话并打开右侧文件面板。
 - **都能改**：文件夹、标签可就地改名或删除（标签改名全库生效、文件夹改名带走文件），条目的名称/文件夹/标签可编辑。
+- **历史版本**：每次保存都把上一版留在 `.history/`（每个文件最多 30 份）；右栏头部「历史版本」→ 选中看正文 → 「恢复这个版本」。恢复前会先给当前内容拍一份快照，所以恢复本身也能撤回。
+- **收进库**：引用型条目可以复制成库里的真实文件，原件不动。
+- **导入**：`/import` 把 home 目录里的一个文件或一整个目录复制进库（单次上限 2000 个文件）。
 
 安装：`dsh plugin --profile <profile> add dsh-material-library`（未发布 npm 时用 `github:yingqi-studio/dsh-material-library`）。
 

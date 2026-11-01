@@ -30,6 +30,9 @@ const MAX_LIST_ENTRIES = 800;
 const HOME_ROOT = os.homedir();
 const MAX_RAW_BYTES = 24 * 1024 * 1024;
 const ICON_CACHE_DIR = path.join(os.tmpdir(), 'dsh-materials-icons');
+const HISTORY_DIR = '.history';
+const MAX_VERSIONS = 30;
+const MAX_IMPORT_FILES = 2000;
 
 const APP_DIRS = ['/Applications', '/System/Applications', path.join(HOME_ROOT, 'Applications'), '/System/Applications/Utilities'];
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.bmp', '.ico', '.avif']);
@@ -342,6 +345,36 @@ async function countTree(target) {
   return { files, folders };
 }
 
+/**
+ * Copy a directory tree into the library. Dotfiles, node_modules and symlinks
+ * are skipped; the walk stops at the same caps the listing uses.
+ */
+async function copyTree(source, target, depth) {
+  if (depth > MAX_DEPTH) return 0;
+  await fsp.mkdir(target, { recursive: true });
+  let entries = [];
+  try {
+    entries = await fsp.readdir(source, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let copied = 0;
+  for (const entry of entries) {
+    if (copied >= MAX_IMPORT_FILES) break;
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    if (entry.isSymbolicLink()) continue;
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    if (entry.isDirectory()) {
+      copied += await copyTree(from, to, depth + 1);
+    } else if (entry.isFile()) {
+      await fsp.copyFile(from, to);
+      copied += 1;
+    }
+  }
+  return copied;
+}
+
 async function writeAtomic(target, text) {
   const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
   await fsp.writeFile(temporary, text, 'utf8');
@@ -352,6 +385,14 @@ async function writeAtomic(target, text) {
  * The library: directories and Markdown files on disk, tags in one JSON index,
  * every mutation serialized so concurrent requests cannot interleave.
  */
+/**
+ * Sortable, filename-safe stamp for one saved version.
+ */
+function versionStamp(date) {
+  const iso = (date ?? new Date()).toISOString();
+  return `${iso.slice(0, 10).replace(/-/g, '')}T${iso.slice(11, 19).replace(/:/g, '')}-${iso.slice(20, 23)}Z`;
+}
+
 class MaterialsStore {
   constructor(root) {
     this.root = root;
@@ -553,6 +594,133 @@ class MaterialsStore {
     });
   }
 
+  /** Directory that holds saved versions of one material. */
+  historyPath(rel) {
+    const parts = normalizeRel(rel).split('/');
+    return path.join(this.root, HISTORY_DIR, ...parts);
+  }
+
+  /** Keep the previous body as a version before it gets overwritten. */
+  async snapshot(rel, content) {
+    if (typeof content !== 'string' || content === '') return;
+    const dir = this.historyPath(rel);
+    await fsp.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `${versionStamp()}.md`);
+    await fsp.writeFile(file, content, 'utf8');
+    const names = (await fsp.readdir(dir)).filter((name) => name.endsWith('.md')).sort();
+    for (const stale of names.slice(0, Math.max(0, names.length - MAX_VERSIONS))) {
+      await fsp.rm(path.join(dir, stale), { force: true });
+    }
+  }
+
+  /** Saved versions of one material, newest first. */
+  async listVersions(rel) {
+    const normalized = normalizeRel(rel);
+    if (normalized === '') throw new RequestError(400, 'path must name a material');
+    const dir = this.historyPath(normalized);
+    let names = [];
+    try {
+      names = (await fsp.readdir(dir)).filter((name) => name.endsWith('.md'));
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return { path: normalized, versions: [] };
+      throw error;
+    }
+    const versions = [];
+    for (const name of names.sort().reverse()) {
+      const stat = await fsp.stat(path.join(dir, name));
+      versions.push({ id: name.slice(0, -MD_SUFFIX.length), size: stat.size, updatedAt: stat.mtimeMs });
+    }
+    return { path: normalized, versions };
+  }
+
+  /** Body of one saved version. */
+  async readVersion({ path: rel, id }) {
+    const normalized = normalizeRel(rel);
+    if (normalized === '') throw new RequestError(400, 'path must name a material');
+    const safeId = safeSegments(String(id ?? ''));
+    if (safeId.length !== 1) throw new RequestError(400, 'version id is not valid');
+    const file = path.join(this.historyPath(normalized), `${safeId[0]}${MD_SUFFIX}`);
+    try {
+      const content = await fsp.readFile(file, 'utf8');
+      return { path: normalized, id: safeId[0], content };
+    } catch (error) {
+      if (error && error.code === 'ENOENT') throw new RequestError(404, 'version not found');
+      throw error;
+    }
+  }
+
+  /** Bring one saved version back, keeping the current body as a version first. */
+  restoreVersion({ path: rel, id }) {
+    return this.serialize(async () => {
+      const version = await this.readVersion({ path: rel, id });
+      const absolute = this.resolve(version.path);
+      let previous = '';
+      try {
+        previous = await fsp.readFile(absolute, 'utf8');
+      } catch (error) {
+        if (!error || error.code !== 'ENOENT') throw error;
+      }
+      if (previous !== version.content) await this.snapshot(version.path, previous);
+      await fsp.writeFile(absolute, version.content, 'utf8');
+      return { path: version.path, id: version.id };
+    });
+  }
+
+  /** Raw bytes of a file inside the library, for previews that need a URL. */
+  async readRaw(rel) {
+    const normalized = normalizeRel(rel);
+    if (normalized === '') throw new RequestError(400, 'path must name a file');
+    const absolute = this.resolve(normalized);
+    let stat;
+    try {
+      stat = await fsp.stat(absolute);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') throw new RequestError(404, 'file not found');
+      throw error;
+    }
+    if (stat.isDirectory()) throw new RequestError(400, 'this path is a folder');
+    if (stat.size > MAX_RAW_BYTES) throw new RequestError(413, 'that file is too large to preview');
+    return { target: absolute, bytes: await fsp.readFile(absolute), modified: stat.mtimeMs };
+  }
+
+  /** Copy an external file or folder into the library, so the library owns it. */
+  importPath({ from, dir, name, tags }) {
+    return this.serialize(async () => {
+      const source = externalPath(from);
+      let stat;
+      try {
+        stat = await fsp.stat(source);
+      } catch {
+        throw new RequestError(404, 'that source is no longer there');
+      }
+      const folder = normalizeRel(dir ?? '');
+      const fallbackName = path.basename(source).replace(/\.md$/i, '');
+      const wanted = sanitizeName(name ?? fallbackName, fallbackName);
+      await fsp.mkdir(this.resolve(folder), { recursive: true });
+      const target = folder === '' ? wanted : `${folder}/${wanted}`;
+      const absolute = this.resolve(target);
+      if (await exists(absolute)) throw new RequestError(409, `${wanted} already exists in this folder`);
+      let imported = 0;
+      if (stat.isDirectory()) {
+        imported = await copyTree(source, absolute, 0);
+      } else {
+        const filename = target.endsWith(MD_SUFFIX) || path.extname(target) !== '' ? target : target + path.extname(source);
+        await fsp.copyFile(source, this.resolve(filename));
+        imported = 1;
+        const index0 = await this.readIndex();
+        const normalizedTags = normalizeTags(tags);
+        if (normalizedTags.length > 0) index0.files[filename] = { tags: normalizedTags };
+        await this.writeIndex(index0);
+        return { path: filename, kind: 'file', files: imported };
+      }
+      const index = await this.readIndex();
+      const normalizedTags = normalizeTags(tags);
+      if (normalizedTags.length > 0) index.files[target] = { tags: normalizedTags };
+      await this.writeIndex(index);
+      return { path: target, kind: 'dir', files: imported };
+    });
+  }
+
   /** Save a material, optionally renaming it and moving it to another folder. */
   update({ path: rel, name, dir, content, tags }) {
     return this.serialize(async () => {
@@ -577,7 +745,10 @@ class MaterialsStore {
         await fsp.rename(absolute, nextAbsolute);
       }
       const body = typeof content === 'string' ? content : previous;
-      if (body !== previous) await fsp.writeFile(nextAbsolute, body, 'utf8');
+      if (body !== previous) {
+        await this.snapshot(current, previous);
+        await fsp.writeFile(nextAbsolute, body, 'utf8');
+      }
       const index = await this.readIndex();
       const kept = index.files[current] ?? {};
       const normalizedTags = tags === undefined ? this.tagsOf(index, current) : normalizeTags(tags);
@@ -798,6 +969,16 @@ class MaterialsStore {
   }
 
   /** Rename, refile, or retag one reference entry. */
+  /** One reference entry by id, without touching its target. */
+  async readRefEntry(id) {
+    const key = String(id ?? '');
+    if (!key) throw new RequestError(400, 'id is required');
+    const index = await this.readIndex();
+    const ref = index.refs[key];
+    if (!ref) throw new RequestError(404, 'reference not found');
+    return { id: key, ...ref };
+  }
+
   updateRef(input) {
     const body = input && typeof input === 'object' ? input : {};
     return this.serialize(async () => {
@@ -1135,6 +1316,29 @@ async function handle(request, response, store) {
         response.end(raw.bytes);
         return;
       }
+      if (route === '/raw') {
+        const raw = await store.readRaw(url.searchParams.get('path') ?? '');
+        response.writeHead(200, {
+          'Content-Type': contentTypeOf(raw.target),
+          'Content-Length': String(raw.bytes.length),
+          'Cache-Control': 'no-store',
+        });
+        response.end(raw.bytes);
+        return;
+      }
+      if (route === '/versions') {
+        const listed = await store.listVersions(url.searchParams.get('path') ?? '');
+        sendJson(response, 200, { ok: true, ...listed });
+        return;
+      }
+      if (route === '/version') {
+        const version = await store.readVersion({
+          path: url.searchParams.get('path') ?? '',
+          id: url.searchParams.get('id') ?? '',
+        });
+        sendJson(response, 200, { ok: true, ...version });
+        return;
+      }
       if (route === '/list') {
         const listing = await store.listExternal({
           path: url.searchParams.get('path') ?? '',
@@ -1211,6 +1415,27 @@ async function handle(request, response, store) {
       case '/tag/delete': {
         const tag = await store.removeTag(body);
         sendJson(response, 200, { ok: true, ...tag });
+        return;
+      }
+      case '/restore': {
+        const restored = await store.restoreVersion(body);
+        sendJson(response, 200, { ok: true, ...restored });
+        return;
+      }
+      case '/import': {
+        const imported = await store.importPath(body);
+        sendJson(response, 200, { ok: true, ...imported });
+        return;
+      }
+      case '/ref/copy': {
+        const refund = await store.readRefEntry(body.id);
+        const imported = await store.importPath({
+          from: refund.absPath,
+          dir: body.dir ?? refund.folder ?? '',
+          name: body.name ?? refund.name,
+          tags: body.tags ?? refund.tags,
+        });
+        sendJson(response, 200, { ok: true, ...imported });
         return;
       }
       case '/folder/delete': {

@@ -244,6 +244,14 @@ window.__ModuleLoader__.load({
       docNoContent: '这条材料还没有正文，点「编辑」写点什么。',
       sortHint: '点一下按修改日期排序',
       openHint: '双击打开',
+      history: '历史版本',
+      historyHint: '每次保存都会留下上一版，选一条可以查看，确认后恢复。',
+      historyEmpty: '这条材料还没有历史版本。',
+      historyPick: '从左边选一个版本查看正文。',
+      restore: '恢复这个版本',
+      restored: '已恢复',
+      copyIntoLibrary: '收进库',
+      copiedIntoLibrary: '已复制进库',
       pickHint: '从中间选一条材料，这里会显示它的内容。',
       openDefault: '默认应用',
       openWith: '打开方式',
@@ -273,6 +281,14 @@ window.__ModuleLoader__.load({
       docNoContent: 'Nothing written yet. Press Edit to start.',
       sortHint: 'Click to sort by date modified',
       openHint: 'Double-click to open',
+      history: 'Versions',
+      historyHint: 'Every save keeps the previous body. Pick one to look at it, then restore if you want it back.',
+      historyEmpty: 'No saved versions yet.',
+      historyPick: 'Pick a version on the left to read it.',
+      restore: 'Restore this version',
+      restored: 'Restored',
+      copyIntoLibrary: 'Copy into library',
+      copiedIntoLibrary: 'Copied into the library',
       pickHint: 'Pick a material in the middle column to see it here.',
       openDefault: 'Default app',
       openWith: 'Open with',
@@ -506,6 +522,21 @@ window.__ModuleLoader__.load({
 .fdr-menu-hint { font-size:10.5px; color:var(--dsw-alias-label-secondary); }
 .fdr-menu-sep { height:1px; margin:4px 6px; background:var(--dsw-alias-border-l1); }
 .fdr-thumb { display:block; max-width:100%; border:1px solid var(--dsw-alias-border-l1); border-radius:10px; margin:0 0 18px; background:var(--dsw-alias-bg-layer-1); }
+.fdr-embed { display:block; width:100%; border:1px solid var(--dsw-alias-border-l1); border-radius:10px; background:var(--dsw-alias-bg-layer-1); margin:0 0 18px; }
+.fdr-embed-html { height:560px; }
+.fdr-embed-pdf { height:640px; }
+.fdr-table-wrap { overflow:auto; max-height:560px; border:1px solid var(--dsw-alias-border-l1); border-radius:10px; margin:0 0 18px; }
+.fdr-grid { border-collapse:collapse; width:100%; font-size:12.5px; }
+.fdr-grid th, .fdr-grid td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--dsw-alias-border-l1); white-space:nowrap; }
+.fdr-grid th { position:sticky; top:0; background:var(--dsw-alias-bg-layer-2); font-weight:600; }
+.fdr-history { width:min(760px, 92vw); }
+.fdr-history-body { display:flex; gap:12px; min-height:240px; max-height:52vh; }
+.fdr-history-list { flex:0 0 190px; overflow:auto; display:flex; flex-direction:column; gap:2px; }
+.fdr-history-item { display:flex; justify-content:space-between; gap:8px; padding:6px 9px; border:none; border-radius:7px; background:transparent; color:var(--dsw-alias-label-primary); font-family:inherit; font-size:12px; cursor:pointer; text-align:left; }
+.fdr-history-item:hover { background:var(--dsw-alias-bg-layer-2); }
+.fdr-history-item[data-active="true"] { background:color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent); }
+.fdr-history-size { color:var(--dsw-alias-label-secondary); }
+.fdr-history-pane { flex:1 1 auto; min-width:0; overflow:auto; border:1px solid var(--dsw-alias-border-l1); border-radius:10px; padding:10px 12px; background:var(--dsw-alias-bg-layer-1); }
 .fdr-doc-scroll { flex:1 1 auto; overflow:auto; }
 .fdr-doc-foot { display:flex; align-items:center; gap:8px; padding:7px 14px; border-top:1px solid var(--dsw-alias-border-l1); }
 .fdr-doc-foot .fdr-status-path { font-size:10.5px; color:var(--dsw-alias-label-secondary); }
@@ -1486,6 +1517,70 @@ window.__ModuleLoader__.load({
       return build(items[0].indent, 0);
     }
 
+    function parseDelimited(text, delimiter) {
+      const rows = [];
+      let row = [];
+      let field = '';
+      let quoted = false;
+      for (let i = 0; i < text.length; i += 1) {
+        const ch = text[i];
+        if (quoted) {
+          if (ch === '"') {
+            if (text[i + 1] === '"') {
+              field += '"';
+              i += 1;
+            } else {
+              quoted = false;
+            }
+          } else {
+            field += ch;
+          }
+          continue;
+        }
+        if (ch === '"') {
+          quoted = true;
+        } else if (ch === delimiter) {
+          row.push(field);
+          field = '';
+        } else if (ch === '\n') {
+          row.push(field);
+          rows.push(row);
+          row = [];
+          field = '';
+        } else if (ch !== '\r') {
+          field += ch;
+        }
+      }
+      if (field !== '' || row.length > 0) {
+        row.push(field);
+        rows.push(row);
+      }
+      return rows.filter((entry) => entry.some((cell) => cell.trim() !== '')).slice(0, 500);
+    }
+
+    function renderTable(text, delimiter) {
+      const rows = parseDelimited(text, delimiter);
+      if (rows.length === 0) return h('p', { className: 'fdr-doc-empty' }, 'empty table');
+      const head = rows[0];
+      const body = rows.slice(1);
+      return h(
+        'div',
+        { className: 'fdr-table-wrap' },
+        h(
+          'table',
+          { className: 'fdr-prose-table fdr-grid' },
+          h('thead', null, h('tr', null, head.map((cell, index) => h('th', { key: `h-${index}` }, cell)))),
+          h(
+            'tbody',
+            null,
+            body.map((line, r) =>
+              h('tr', { key: `r-${r}` }, head.map((_, c) => h('td', { key: `c-${c}` }, line[c] ?? ''))),
+            ),
+          ),
+        ),
+      );
+    }
+
     function renderMarkdown(source) {
       const lines = String(source === null || source === undefined ? '' : source).replace(/\r\n?/g, '\n').split('\n');
       const blocks = [];
@@ -1717,6 +1812,8 @@ window.__ModuleLoader__.load({
       const [openMenu, setOpenMenu] = useState(false);
       const [openInfo, setOpenInfo] = useState(null);
       const [openBusy, setOpenBusy] = useState(false);
+      const [history, setHistory] = useState(null);
+      const [historyBusy, setHistoryBusy] = useState(false);
 
       const selectedDir = trail[at] === undefined ? '' : trail[at];
 
@@ -2607,6 +2704,70 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const openHistory = async () => {
+        if (draft === null || draft.mode === 'ref') return;
+        setHistoryBusy(true);
+        try {
+          const listed = await call(`/versions?path=${encodeURIComponent(draft.path)}`);
+          setHistory({ path: draft.path, versions: Array.isArray(listed.versions) ? listed.versions : [], body: null, id: '' });
+        } catch (failure) {
+          setError(describeError(t, failure));
+        } finally {
+          setHistoryBusy(false);
+        }
+      };
+
+      const peekVersion = async (id) => {
+        if (draft === null || history === null) return;
+        try {
+          const version = await call(`/version?path=${encodeURIComponent(history.path)}&id=${encodeURIComponent(id)}`);
+          setHistory({ ...history, id, body: typeof version.content === 'string' ? version.content : '' });
+        } catch (failure) {
+          setError(describeError(t, failure));
+        }
+      };
+
+      const restoreVersion = async (id) => {
+        if (draft === null || history === null) return;
+        setHistoryBusy(true);
+        try {
+          await call('/restore', post({ path: history.path, id }));
+          setHistory(null);
+          await refresh();
+          const reopened = await call(`/file?path=${encodeURIComponent(draft.path)}`);
+          setDraft({
+            mode: 'note',
+            path: reopened.path,
+            name: reopened.name,
+            dir: reopened.dir,
+            tags: reopened.tags,
+            content: reopened.content,
+            updatedAt: reopened.updatedAt,
+            preview: null,
+            ref: null,
+          });
+          setToast(t('restored'));
+        } catch (failure) {
+          setError(describeError(t, failure));
+        } finally {
+          setHistoryBusy(false);
+        }
+      };
+
+      const copyRefIntoLibrary = async () => {
+        if (draft === null || draft.mode !== 'ref' || !draft.ref) return;
+        setBusy(true);
+        try {
+          await call('/ref/copy', post({ id: draft.ref.id }));
+          await refresh();
+          setToast(t('copiedIntoLibrary'));
+        } catch (failure) {
+          setError(describeError(t, failure));
+        } finally {
+          setBusy(false);
+        }
+      };
+
       const kindLabel = (value) => {
         if (value === null) return '';
         if (value.mode === 'ref' && value.ref && value.ref.kind === 'dir') return t('kindFolder');
@@ -2706,6 +2867,12 @@ window.__ModuleLoader__.load({
                     },
                     `${t('openWith')} ▾`,
                   ),
+                draft.mode !== 'ref' &&
+                  h(
+                    'button',
+                    { className: 'fdr-btn fdr-btn-quiet', type: 'button', onClick: openHistory, disabled: historyBusy },
+                    t('history'),
+                  ),
                 h('span', { className: 'fdr-grow' }),
                 (draft.mode === 'edit' || draft.mode === 'ref') &&
                   h(
@@ -2768,26 +2935,51 @@ window.__ModuleLoader__.load({
               draft.tags.map((tag) => h('span', { key: `meta-${tag}`, className: 'fdr-tag', style: { cursor: 'default' } }, tag)),
             );
 
-      const isImageRef = draft !== null && draft.mode === 'ref' && draft.ref && draft.ref.kind === 'file' && /\.(png|jpe?g|gif|webp|heic|bmp|avif|svg)$/i.test(String(draft.ref.absPath || ''));
+      const previewUrl =
+        draft === null
+          ? ''
+          : draft.mode === 'ref'
+            ? `/api/dsh-materials/ref/raw?id=${encodeURIComponent(draft.ref.id)}`
+            : `/api/dsh-materials/raw?path=${encodeURIComponent(draft.path)}`;
 
-      const previewBody = isImageRef
-        ? h('img', {
-            className: 'fdr-thumb',
-            alt: draft.name,
-            src: `/api/dsh-materials/ref/raw?id=${encodeURIComponent(draft.ref.id)}`,
-          })
-        : draft !== null && draft.mode === 'ref' && draft.preview !== null && draft.preview !== undefined
-          ? draft.preview.tooLarge === true
-            ? h('p', { className: 'fdr-doc-empty' }, t('previewTooLarge'))
-            : draft.preview.binary === true
-              ? h('p', { className: 'fdr-doc-empty' }, t('previewBinary'))
-              : draft.preview.text === ''
-                ? h('p', { className: 'fdr-doc-empty' }, t('docNoContent'))
-                : /\.(md|markdown)$/i.test(String(draft.preview.path || draft.preview.name || ''))
-                  ? renderMarkdown(draft.preview.text)
-                  : h('pre', { className: 'fdr-prose-pre' }, h('code', null, draft.preview.text))
-          : null;
-
+      const renderPreview = (entry, tr) => {
+        const target = entry.mode === 'ref' ? String((entry.ref && entry.ref.absPath) || '') : String(entry.path || '');
+        const ext = (target.match(/\.[a-z0-9]+$/i) || [''])[0].toLowerCase();
+        const url = previewUrl;
+        if (/^\.(png|jpe?g|gif|webp|heic|bmp|avif|svg|ico)$/.test(ext)) {
+          return h('img', { className: 'fdr-thumb', alt: entry.name, src: url });
+        }
+        if (ext === '.pdf') {
+          return h('iframe', { className: 'fdr-embed fdr-embed-pdf', title: entry.name, src: url });
+        }
+        if (ext === '.html' || ext === '.htm') {
+          const body = entry.preview && typeof entry.preview.text === 'string' ? entry.preview.text : '';
+          if (body === '') return h('p', { className: 'fdr-doc-empty' }, tr('docNoContent'));
+          return h('iframe', {
+            className: 'fdr-embed fdr-embed-html',
+            title: entry.name,
+            sandbox: 'allow-scripts allow-popups allow-forms',
+            srcDoc: body,
+          });
+        }
+        if (ext === '.csv' || ext === '.tsv') {
+          const body = entry.preview && typeof entry.preview.text === 'string' ? entry.preview.text : '';
+          if (body === '') return h('p', { className: 'fdr-doc-empty' }, tr('docNoContent'));
+          return renderTable(body, ext === '.tsv' ? '\t' : ',');
+        }
+        if (entry.mode === 'ref') {
+          if (!entry.preview || entry.preview === undefined) return null;
+          if (entry.preview.tooLarge === true) return h('p', { className: 'fdr-doc-empty' }, tr('previewTooLarge'));
+          if (entry.preview.binary === true) return h('p', { className: 'fdr-doc-empty' }, tr('previewBinary'));
+          if (entry.preview.text === '') return h('p', { className: 'fdr-doc-empty' }, tr('docNoContent'));
+          if (/\.(md|markdown)$/i.test(String(entry.preview.path || entry.preview.name || ''))) {
+            return renderMarkdown(entry.preview.text);
+          }
+          return h('pre', { className: 'fdr-prose-pre' }, h('code', null, entry.preview.text));
+        }
+        return entry.content === '' ? h('p', { className: 'fdr-doc-empty' }, tr('docNoContent')) : renderMarkdown(bodyWithoutTitle(entry.content));
+      };
+      const previewBody = draft === null ? null : renderPreview(draft, t);
       const refBody =
         draft !== null && draft.mode === 'ref'
           ? h(
@@ -2802,6 +2994,11 @@ window.__ModuleLoader__.load({
                 draft.ref && draft.ref.counts
                   ? `${draft.ref.counts.files || 0} ${t('refKindFile')} · ${draft.ref.counts.folders || 0} ${t('refKindDir')}`
                   : '',
+              ),
+              h(
+                'button',
+                { className: 'fdr-btn fdr-btn-quiet', type: 'button', disabled: busy || !draft.ref || draft.ref.exists === false, onClick: copyRefIntoLibrary },
+                t('copyIntoLibrary'),
               ),
             )
           : null;
@@ -2966,6 +3163,64 @@ window.__ModuleLoader__.load({
             },
             defaultFolder: selectedDir,
           }),
+        history !== null &&
+          h(
+            'div',
+            { className: 'mat-overlay', onClick: (event) => { if (event.target === event.currentTarget) setHistory(null); } },
+            h(
+              'div',
+              { className: 'mat-dialog fdr-history' },
+              h(
+                'div',
+                { className: 'mat-dialog-head' },
+                h('h2', null, `${t('history')}${history.versions.length > 0 ? ` · ${history.versions.length}` : ''}`),
+                h('button', { className: 'mat-icon-btn', type: 'button', onClick: () => setHistory(null), title: t('close') }, '✕'),
+              ),
+              h('p', { className: 'mat-dialog-sub' }, t('historyHint')),
+              history.versions.length === 0
+                ? h('p', { className: 'fdr-doc-empty' }, t('historyEmpty'))
+                : h(
+                    'div',
+                    { className: 'fdr-history-body' },
+                    h(
+                      'div',
+                      { className: 'fdr-history-list' },
+                      history.versions.map((version) =>
+                        h(
+                          'button',
+                          {
+                            key: version.id,
+                            className: 'fdr-history-item',
+                            type: 'button',
+                            'data-active': history.id === version.id ? 'true' : 'false',
+                            onClick: () => peekVersion(version.id),
+                          },
+                          h('span', { className: 'fdr-history-time' }, stamp(version.updatedAt)),
+                          h('span', { className: 'fdr-history-size' }, `${Math.max(1, Math.round(version.size / 1024))} KB`),
+                        ),
+                      ),
+                    ),
+                    h(
+                      'div',
+                      { className: 'fdr-history-pane' },
+                      history.id === ''
+                        ? h('p', { className: 'fdr-doc-empty' }, t('historyPick'))
+                        : h('pre', { className: 'fdr-prose-pre' }, h('code', null, history.body ?? '')),
+                    ),
+                  ),
+              h(
+                'div',
+                { className: 'mat-dialog-foot' },
+                h('button', { className: 'mat-btn', type: 'button', onClick: () => setHistory(null) }, t('close')),
+                history.id !== '' &&
+                  h(
+                    'button',
+                    { className: 'mat-btn mat-btn-primary', type: 'button', disabled: historyBusy, onClick: () => restoreVersion(history.id) },
+                    t('restore'),
+                  ),
+              ),
+            ),
+          ),
       );
     }
 
