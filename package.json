@@ -1,0 +1,63 @@
+{
+  "name": "dsh-material-library",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "description": "Material library for DeepSeek Harness: collect folders, files and notes from a conversation, organize them in real folders with tags, and reopen a chat's output in one click.",
+  "icon": "icon.svg",
+  "license": "MIT",
+  "author": "yingqi-studio",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yingqi-studio/dsh-material-library.git"
+  },
+  "homepage": "https://github.com/yingqi-studio/dsh-material-library#readme",
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "materials",
+    "notes",
+    "knowledge-base",
+    "tags"
+  ],
+  "engines": {
+    "dsh": ">=0.2.0"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "docs/*.png"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}
