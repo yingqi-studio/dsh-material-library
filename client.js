@@ -58,6 +58,8 @@ window.__ModuleLoader__.load({
       close: '关闭',
       delete: '删除',
       deleteFolder: '删除文件夹',
+      autoRules: '自动归档',
+      stopAutoRule: '不再自动归档',
       confirmDelete: '确认删除',
       confirmDeleteFolder: '确认删除文件夹',
       folderNotEmpty: '文件夹里还有材料，先清空再删除。',
@@ -167,6 +169,8 @@ window.__ModuleLoader__.load({
       close: 'Close',
       delete: 'Delete',
       deleteFolder: 'Delete folder',
+      autoRules: 'Auto-filed',
+      stopAutoRule: 'Stop auto-filing',
       confirmDelete: 'Confirm delete',
       confirmDeleteFolder: 'Confirm folder delete',
       folderNotEmpty: 'The folder still holds materials; empty it first.',
@@ -432,6 +436,9 @@ window.__ModuleLoader__.load({
 .fdr-nav[data-active="true"] .fdr-nav-ico, .fdr-nav[data-active="true"] .fdr-nav-name { color:var(--dsw-alias-brand-primary); }
 .fdr-nav-name { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .fdr-nav-count { flex:0 0 auto; font-size:11px; color:var(--dsw-alias-label-secondary); font-variant-numeric:tabular-nums; }
+.fdr-nav-rule { cursor:default; }
+.fdr-nav-rule:hover { background:var(--dsw-alias-bg-layer-2); }
+.fdr-nav-rule:hover .fdr-row-ops { display:flex; }
 .fdr-nav-dot { flex:0 0 auto; width:7px; height:7px; margin:0 3px; border-radius:50%; background:var(--dsw-alias-label-secondary); opacity:.45; }
 .fdr-twisty { flex:0 0 auto; width:10px; font-size:9px; line-height:1; color:var(--dsw-alias-label-secondary); cursor:default; }
 .fdr-side-foot { border-top:1px solid var(--dsw-alias-border-l1); padding:6px 12px; }
@@ -1814,6 +1821,7 @@ window.__ModuleLoader__.load({
       const [openBusy, setOpenBusy] = useState(false);
       const [history, setHistory] = useState(null);
       const [historyBusy, setHistoryBusy] = useState(false);
+      const [rules, setRules] = useState([]);
 
       const selectedDir = trail[at] === undefined ? '' : trail[at];
 
@@ -1829,6 +1837,12 @@ window.__ModuleLoader__.load({
           }
           setSnapshot(next);
           setError('');
+          try {
+            const known = await call('/rules');
+            setRules(Array.isArray(known.rules) ? known.rules : []);
+          } catch {
+            setRules([]);
+          }
         } catch (failure) {
           setError(describeError(t, failure));
         } finally {
@@ -2445,6 +2459,37 @@ window.__ModuleLoader__.load({
                         '\u00d7',
                       ),
                     ],
+              ),
+            ),
+          ),
+          rules.length > 0 && h('div', { className: 'fdr-group-label' }, t('autoRules')),
+          rules.map((rule) =>
+            h(
+              'div',
+              { key: rule.id, className: 'fdr-nav fdr-nav-rule', title: `${rule.root} — ${rule.folder || t('root')}` },
+              h('span', { className: 'fdr-nav-dot' }),
+              h('span', { className: 'fdr-nav-name' }, rule.root.split('/').filter(Boolean).slice(-1)[0] || rule.root),
+              h('span', { className: 'fdr-nav-count' }, String(rule.lastCount || 0)),
+              h(
+                'span',
+                { className: 'fdr-row-ops' },
+                h(
+                  'button',
+                  {
+                    className: 'fdr-op fdr-op-danger',
+                    type: 'button',
+                    title: t('stopAutoRule'),
+                    onClick: async () => {
+                      try {
+                        await call('/rules/delete', post({ id: rule.id }));
+                        await refresh();
+                      } catch (failure) {
+                        setError(describeError(t, failure));
+                      }
+                    },
+                  },
+                  '\u00d7',
+                ),
               ),
             ),
           ),

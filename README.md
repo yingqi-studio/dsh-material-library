@@ -38,6 +38,7 @@ Requires a host with the sidebar-entry and right-sidebar slots (`dsh.web` 0.2.x)
 ```
 ~/.dsh/materials/            # library root (override with the plugin config `root`)
 ├── .index.json              # tags for notes, plus the references you collected
+├── .rules.json              # auto-filing rules (see below)
 ├── 使用说明.md               # a note = a real markdown file
 └── 客户项目/                 # a folder = a real folder
     └── 需求.md
@@ -72,6 +73,9 @@ The UI talks to the host over same-origin JSON routes under `/api/dsh-materials`
 | POST | `/ref/copy` | copy a collected reference into the library as a real file |
 | POST | `/import` | copy a file or directory from inside the home directory into the library |
 | POST | `/archive` | file files or a folder into the library as references (idempotent; merges tags on a path already filed) |
+| GET | `/rules` | auto-filing rules (root, folder, tags, last run) |
+| POST | `/rules/run` | run the rules of one session now |
+| POST | `/rules/delete` | forget one rule |
 
 Everything that mutates goes through one serialized store; conflicts (duplicate name, non-empty folder, unknown application) come back as readable 4xx errors.
 
@@ -96,6 +100,22 @@ It is idempotent per path: filing the same path again refreshes its tags and fol
 
 > 跑完把 out/ 收进材料库，folder 用「日报/当月」，tags 用 ["日报"]。
 
+## Auto-filing: file it once, then it keeps filing
+
+Filing a folder or a file from a session is also a **decision**: "this session keeps producing this". The library remembers it, and at the end of every later turn in that same session it re-files that folder by itself — no prompt instruction, no extra tool call.
+
+```
+materials_archive(path="out/", folder="日报", tags=["日报"])   # first time, by hand
+# ... the task writes out/2026-11-03.html on its next run ...
+# ... end of that turn: out/2026-11-03.html is already in 日报 ...
+```
+
+- The rule is created by any manual filing that carries a session: the `materials_archive` tool, the panel's 「从对话采集」, or 「收进材料库」.
+- It is keyed by session + target, so filing the same folder again only extends its tags.
+- Rules never point at the library itself or at the session's working directory (that would file everything, every turn); depth is capped at 3.
+- The panel lists them under **自动归档** in the left pane; hover a row and click × to stop one.
+- Rules live in `.rules.json` at the library root; a target that disappeared is skipped, not fatal.
+
 ## Notes and limits
 
 - A collected entry is a **reference**, not a copy: if the original moves, the entry shows as missing.
@@ -119,6 +139,7 @@ It is idempotent per path: filing the same path again refreshes its tags and fol
 - **历史版本**：每次保存都把上一版留在 `.history/`（每个文件最多 30 份）；右栏头部「历史版本」→ 选中看正文 → 「恢复这个版本」。恢复前会先给当前内容拍一份快照，所以恢复本身也能撤回。
 - **收进库**：引用型条目可以复制成库里的真实文件，原件不动。
 - **导入**：`/import` 把 home 目录里的一个文件或一整个目录复制进库（单次上限 2000 个文件）。
+- **自动归档规则**：手动收过一次的目录/文件会被记住（工具、从对话采集、收进库都算），之后同一会话每轮结束自动再收一遍——不用在 prompt 里写指令。左栏「自动归档」可看到规则，悬停点 × 即停。
 - **给 agent 的工具 `materials_archive`**：定时任务可以自己把产出收进库。任务 prompt 末尾加一句「跑完把 out/ 收进材料库，folder 用日报/当月，tags 用 ["日报"]」即可；同一条路径重复归档只更新标签与文件夹，不会重复入库，原件不动。
 
 安装：`dsh plugin --profile <profile> add dsh-material-library`（未发布 npm 时用 `github:yingqi-studio/dsh-material-library`）。

@@ -35,6 +35,10 @@ const MAX_VERSIONS = 30;
 const MAX_IMPORT_FILES = 2000;
 const ARCHIVE_MAX_ENTRIES = 200;
 const ARCHIVE_DEFAULT_LIMIT = 50;
+const RULES_NAME = '.rules.json';
+const MAX_RULES = 200;
+const AUTO_ARCHIVE_LIMIT = 50;
+const AUTO_RULE_DEPTH = 3;
 
 const APP_DIRS = ['/Applications', '/System/Applications', path.join(HOME_ROOT, 'Applications'), '/System/Applications/Utilities'];
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.bmp', '.ico', '.avif']);
@@ -345,6 +349,36 @@ function normalizeIndex(raw) {
   return { version: 2, files, refs };
 }
 
+/**
+ * Filing rules: a folder or file a session keeps producing, filed again on
+ * every turn once the user has filed it by hand at least once.
+ */
+function normalizeRules(raw) {
+  const list = raw && Array.isArray(raw.rules) ? raw.rules : [];
+  const out = [];
+  for (const rule of list) {
+    if (!rule || typeof rule !== 'object') continue;
+    if (typeof rule.sessionId !== 'string' || rule.sessionId === '') continue;
+    if (typeof rule.root !== 'string' || rule.root === '') continue;
+    out.push({
+      id: typeof rule.id === 'string' && rule.id !== '' ? rule.id : `rule-${Date.now().toString(36)}`,
+      sessionId: rule.sessionId,
+      sessionTitle: typeof rule.sessionTitle === 'string' ? rule.sessionTitle : '',
+      root: rule.root,
+      kind: rule.kind === 'file' ? 'file' : 'dir',
+      folder: normalizeRel(rule.folder ?? ''),
+      tags: normalizeTags(rule.tags),
+      include: typeof rule.include === 'string' && rule.include !== '' ? rule.include : null,
+      depth: Number.isInteger(rule.depth) ? Math.max(0, Math.min(AUTO_RULE_DEPTH, rule.depth)) : 1,
+      cwd: typeof rule.cwd === 'string' ? rule.cwd : '',
+      createdAt: typeof rule.createdAt === 'number' ? rule.createdAt : 0,
+      lastRunAt: typeof rule.lastRunAt === 'number' ? rule.lastRunAt : 0,
+      lastCount: typeof rule.lastCount === 'number' ? rule.lastCount : 0,
+    });
+  }
+  return out;
+}
+
 /** Count what one referenced folder holds, bounded so a huge tree stays cheap. */
 async function countTree(target) {
   let files = 0;
@@ -424,6 +458,7 @@ class MaterialsStore {
   constructor(root) {
     this.root = root;
     this.indexPath = path.join(root, INDEX_NAME);
+    this.rulesPath = path.join(root, RULES_NAME);
     this.queue = Promise.resolve();
   }
 
@@ -465,6 +500,137 @@ class MaterialsStore {
 
   async writeIndex(index) {
     await writeAtomic(this.indexPath, `${JSON.stringify(index, null, 2)}\n`);
+  }
+
+  async readRules() {
+    try {
+      const raw = JSON.parse(await fsp.readFile(this.rulesPath, 'utf8'));
+      return normalizeRules(raw);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return [];
+      if (error instanceof SyntaxError) return [];
+      throw error;
+    }
+  }
+
+  async writeRules(rules) {
+    const trimmed = rules.slice(-MAX_RULES);
+    await writeAtomic(this.rulesPath, `${JSON.stringify({ version: 1, rules: trimmed }, null, 2)}\n`);
+  }
+
+  /**
+   * Remember one manual filing as a recurring rule. Callers hold the queue.
+   * A rule is skipped when it cannot mean "this session keeps producing it":
+   * no session, a target already inside the library, or the session cwd itself.
+   */
+  async saveRule(input) {
+    const sessionId = typeof input.sessionId === 'string' ? input.sessionId : '';
+    if (sessionId === '') return null;
+    const root = path.resolve(String(input.root ?? ''));
+    if (root === '' ) return null;
+    const cwd = typeof input.cwd === 'string' ? input.cwd : '';
+    if (cwd !== '' && root === path.resolve(cwd)) return null;
+    const libraryRoot = path.resolve(this.root);
+    if (root === libraryRoot || root.startsWith(libraryRoot + path.sep)) return null;
+    const kind = input.kind === 'file' ? 'file' : 'dir';
+    const include = typeof input.include === 'string' && input.include !== '' ? input.include : null;
+    const depth = kind === 'file' ? 0 : Math.max(0, Math.min(AUTO_RULE_DEPTH, Number.isInteger(input.depth) ? input.depth : 1));
+    const rules = await this.readRules();
+    const existing = rules.find((rule) => rule.sessionId === sessionId && rule.root === root && rule.include === include);
+    if (existing !== undefined) {
+      existing.folder = normalizeRel(input.folder ?? existing.folder);
+      existing.tags = normalizeTags([...existing.tags, ...normalizeTags(input.tags)]);
+      existing.depth = depth;
+      if (typeof input.sessionTitle === 'string' && input.sessionTitle !== '') existing.sessionTitle = input.sessionTitle;
+      await this.writeRules(rules);
+      return existing;
+    }
+    const rule = {
+      id: `rule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      sessionId,
+      sessionTitle: typeof input.sessionTitle === 'string' ? input.sessionTitle : '',
+      root,
+      kind,
+      folder: normalizeRel(input.folder ?? ''),
+      tags: normalizeTags(input.tags),
+      include,
+      depth,
+      cwd,
+      createdAt: Date.now(),
+      lastRunAt: 0,
+      lastCount: 0,
+    };
+    rules.push(rule);
+    await this.writeRules(rules);
+    return rule;
+  }
+
+  /** Every rule, newest first, with whether its target is still there. */
+  async listRules() {
+    const rules = await this.readRules();
+    const out = [];
+    for (const rule of rules) {
+      let exists = false;
+      let stat = null;
+      try {
+        stat = await fsp.stat(rule.root);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      out.push({ ...rule, exists, updatedAt: stat ? stat.mtimeMs : 0 });
+    }
+    out.sort((a, b) => b.createdAt - a.createdAt);
+    return out;
+  }
+
+  removeRule(input) {
+    const body = input && typeof input === 'object' ? input : {};
+    return this.serialize(async () => {
+      const id = typeof body.id === 'string' ? body.id : '';
+      const rules = await this.readRules();
+      const next = rules.filter((rule) => rule.id !== id);
+      if (next.length === rules.length) throw new RequestError(404, 'rule not found');
+      await this.writeRules(next);
+      return { id };
+    });
+  }
+
+  /**
+   * Re-file everything the rules of one session point at. Runs after a turn
+   * closes; unknown folders and vanished targets are skipped, never fatal.
+   */
+  async runRules(sessionId) {
+    const key = typeof sessionId === 'string' ? sessionId : '';
+    if (key === '') return { sessionId: key, applied: [] };
+    const rules = (await this.readRules()).filter((rule) => rule.sessionId === key);
+    if (rules.length === 0) return { sessionId: key, applied: [] };
+    const applied = [];
+    for (const rule of rules) {
+      try {
+        const result = await this.serialize(() => this.archiveInner({
+          path: rule.root,
+          folder: rule.folder,
+          tags: rule.tags,
+          include: rule.include ?? undefined,
+          depth: rule.kind === 'file' ? 0 : rule.depth,
+          sessionId: rule.sessionId,
+          sessionTitle: rule.sessionTitle,
+          cwd: rule.cwd,
+          limit: AUTO_ARCHIVE_LIMIT,
+          remember: false,
+        }));
+        const added = result.archived.filter((item) => item.added === true).length;
+        applied.push({ rule: rule.id, root: rule.root, added, total: result.archived.length });
+        rule.lastRunAt = Date.now();
+        rule.lastCount = result.archived.length;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        applied.push({ rule: rule.id, root: rule.root, added: 0, error: message });
+      }
+    }
+    await this.serialize(() => this.writeRules(rules));
+    return { sessionId: key, applied };
   }
 
   /** Tags for one material, from the index. */
@@ -991,6 +1157,19 @@ class MaterialsStore {
         counts,
       };
       await this.writeIndex(index);
+      if (body.remember !== false) {
+        await this.saveRule({
+          root: absPath,
+          kind,
+          folder,
+          tags: normalizeTags(body.tags),
+          include: null,
+          depth: kind === 'dir' ? 1 : 0,
+          sessionId: typeof body.sessionId === 'string' ? body.sessionId : '',
+          sessionTitle: typeof body.sessionTitle === 'string' ? body.sessionTitle : '',
+          cwd,
+        });
+      }
       return { id, absPath, relPath, kind };
     });
   }
@@ -1013,7 +1192,12 @@ class MaterialsStore {
    */
   archive(input) {
     const body = input && typeof input === 'object' ? input : {};
-    return this.serialize(async () => {
+    return this.serialize(() => this.archiveInner(body));
+  }
+
+  /** The body of archive(); the caller already holds the write queue. */
+  async archiveInner(body) {
+    {
       await this.ensure();
       const rawPath = expandTarget(body.path);
       if (rawPath === '') throw new RequestError(400, 'path is required');
@@ -1118,8 +1302,22 @@ class MaterialsStore {
         archived.push({ id, absPath: target, name, kind, folder, tags, added: true });
       }
       await this.writeIndex(index);
+      if (body.remember !== false && sessionId !== '' && archived.length > 0) {
+        const rememberDepth = Math.min(depth, AUTO_RULE_DEPTH);
+        await this.saveRule({
+          root: absTarget,
+          kind: stat.isDirectory() ? 'dir' : 'file',
+          folder,
+          tags,
+          include: typeof body.include === 'string' ? body.include : null,
+          depth: rememberDepth,
+          sessionId,
+          sessionTitle,
+          cwd,
+        });
+      }
       return { root: this.root, folder, archived, truncated, limit };
-    });
+    }
   }
 
   updateRef(input) {
@@ -1425,6 +1623,10 @@ async function handle(request, response, store) {
         sendJson(response, 200, { ok: true, path: HOME_ROOT });
         return;
       }
+      if (route === '/rules') {
+        sendJson(response, 200, { ok: true, rules: await store.listRules() });
+        return;
+      }
       if (route === '/session-times') {
         sendJson(response, 200, { ok: true, times: await readSessionTimes() });
         return;
@@ -1575,6 +1777,16 @@ async function handle(request, response, store) {
         sendJson(response, 200, { ok: true, ...archived });
         return;
       }
+      case '/rules/delete': {
+        const removed = await store.removeRule(body);
+        sendJson(response, 200, { ok: true, ...removed });
+        return;
+      }
+      case '/rules/run': {
+        const ran = await store.runRules(body.sessionId);
+        sendJson(response, 200, { ok: true, ...ran });
+        return;
+      }
       case '/ref/copy': {
         const refund = await store.readRefEntry(body.id);
         const imported = await store.importPath({
@@ -1716,6 +1928,34 @@ export async function apply(ctx, config) {
     ctx.inject(['tools'], registerTool);
   } else if (ctx.tools && typeof ctx.tools.register === 'function') {
     registerTool(ctx);
+  }
+  const lastRun = new Map();
+  const onTurnStopping = (payload) => {
+    const session = payload && payload.agent && payload.agent.session ? payload.agent.session : null;
+    const sessionId = session && typeof session.id === 'string' ? session.id : '';
+    if (sessionId === '') return;
+    const now = Date.now();
+    const previous = lastRun.get(sessionId) ?? 0;
+    if (now - previous < 3000) return;
+    lastRun.set(sessionId, now);
+    void store
+      .runRules(sessionId)
+      .then((result) => {
+        const added = result.applied.reduce((sum, item) => sum + (item.added ?? 0), 0);
+        if (added > 0) ctx.logger.info('materials: auto-filed %d item(s) for %s', added, sessionId);
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.logger.warn('materials: auto-filing failed: %s', message);
+      });
+  };
+  if (typeof ctx.on === 'function') {
+    ctx.effect(() => {
+      const dispose = ctx.on('agent/turn-stopping', onTurnStopping);
+      return () => {
+        if (typeof dispose === 'function') dispose();
+      };
+    }, 'materials.auto-archive');
   }
   ctx.logger.info('materials: library at %s', store.root);
 }
