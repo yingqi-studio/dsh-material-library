@@ -40,7 +40,7 @@ const MAX_RULES = 200;
 const AUTO_ARCHIVE_LIMIT = 50;
 const AUTO_RULE_DEPTH = 3;
 const MAX_RULE_EXTENSIONS = 4;
-const SCHEDULE_MARK = '[SCHEDULE REMINDER]';
+const SCHEDULE_MARK = '[SCHEDULE REMINDER';
 /** Transient files a task writes on the way to its real output. */
 const JUNK_EXTENSIONS = new Set(['.tmp', '.temp', '.log', '.bak', '.swp', '.part', '.crdownload', '.ds_store']);
 
