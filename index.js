@@ -39,6 +39,10 @@ const RULES_NAME = '.rules.json';
 const MAX_RULES = 200;
 const AUTO_ARCHIVE_LIMIT = 50;
 const AUTO_RULE_DEPTH = 3;
+const MAX_RULE_EXTENSIONS = 4;
+const SCHEDULE_MARK = '[SCHEDULE REMINDER]';
+/** Transient files a task writes on the way to its real output. */
+const JUNK_EXTENSIONS = new Set(['.tmp', '.temp', '.log', '.bak', '.swp', '.part', '.crdownload', '.ds_store']);
 
 const APP_DIRS = ['/Applications', '/System/Applications', path.join(HOME_ROOT, 'Applications'), '/System/Applications/Utilities'];
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.bmp', '.ico', '.avif']);
@@ -454,12 +458,56 @@ function versionStamp(date) {
   return `${iso.slice(0, 10).replace(/-/g, '')}T${iso.slice(11, 19).replace(/:/g, '')}-${iso.slice(20, 23)}Z`;
 }
 
+/**
+ * The file types a filing actually produced, as an include pattern. A rule made
+ * from "I filed today's report.html" should keep picking up `*.html` and leave
+ * the run's intermediate `.json`/`.png` alone; too many types means the target is
+ * a mixed folder rather than one deliverable, and no rule is made.
+ */
+function extensionPattern(names) {
+  const exts = [];
+  for (const name of names) {
+    const ext = path.extname(String(name ?? '')).toLowerCase();
+    if (ext === '' || JUNK_EXTENSIONS.has(ext)) continue;
+    if (!exts.includes(ext)) exts.push(ext);
+  }
+  if (exts.length === 0 || exts.length > MAX_RULE_EXTENSIONS) return null;
+  return exts.join(',');
+}
+
+/** Plain text of one session message, for the schedule marker. */
+function messageText(message) {
+  if (message === null || typeof message !== 'object') return '';
+  const content = message.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  let out = '';
+  for (const block of content) {
+    if (block && block.type === 'text' && typeof block.text === 'string') out += block.text;
+  }
+  return out;
+}
+
 class MaterialsStore {
   constructor(root) {
     this.root = root;
     this.indexPath = path.join(root, INDEX_NAME);
     this.rulesPath = path.join(root, RULES_NAME);
     this.queue = Promise.resolve();
+    /** Set by apply(): tells a filing whether its turn came from a schedule. */
+    this.scheduleProbe = null;
+  }
+
+  /** True when this filing happened in a turn a scheduled task started. */
+  isScheduled(sessionId, explicit) {
+    if (explicit === true) return true;
+    if (explicit === false) return false;
+    if (typeof this.scheduleProbe !== 'function') return false;
+    try {
+      return this.scheduleProbe(sessionId) === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Run one mutation after the previous one settled. */
@@ -526,6 +574,18 @@ class MaterialsStore {
   async saveRule(input) {
     const sessionId = typeof input.sessionId === 'string' ? input.sessionId : '';
     if (sessionId === '') return null;
+    // Only a scheduled run may leave a standing rule behind: an ordinary chat
+    // turn must never turn the library into a dumping ground for its scratch work.
+    if (!this.isScheduled(sessionId, input.scheduled)) return null;
+    const includeDerived = input.include === undefined || input.include === null || input.include === ''
+      ? extensionPattern(input.names ?? [])
+      : null;
+    if (input.include !== undefined && input.include !== null && input.include !== '') {
+      input = { ...input, include: input.include };
+    } else {
+      if (includeDerived === null) return null;
+      input = { ...input, include: includeDerived };
+    }
     const root = path.resolve(String(input.root ?? ''));
     if (root === '' ) return null;
     const cwd = typeof input.cwd === 'string' ? input.cwd : '';
@@ -1159,15 +1219,17 @@ class MaterialsStore {
       await this.writeIndex(index);
       if (body.remember !== false) {
         await this.saveRule({
-          root: absPath,
-          kind,
+          root: kind === 'dir' ? absPath : path.dirname(absPath),
+          kind: 'dir',
           folder,
           tags: normalizeTags(body.tags),
           include: null,
-          depth: kind === 'dir' ? 1 : 0,
+          names: kind === 'dir' ? [] : [path.basename(absPath)],
+          depth: 1,
           sessionId: typeof body.sessionId === 'string' ? body.sessionId : '',
           sessionTitle: typeof body.sessionTitle === 'string' ? body.sessionTitle : '',
           cwd,
+          scheduled: body.scheduled,
         });
       }
       return { id, absPath, relPath, kind };
@@ -1236,6 +1298,7 @@ class MaterialsStore {
               return;
             }
             if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+            if (JUNK_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
             const full = path.join(dir, entry.name);
             if (entry.isDirectory()) {
               if (level < depth) await walk(full, level + 1);
@@ -1304,16 +1367,25 @@ class MaterialsStore {
       await this.writeIndex(index);
       if (body.remember !== false && sessionId !== '' && archived.length > 0) {
         const rememberDepth = Math.min(depth, AUTO_RULE_DEPTH);
+        const explicitInclude = typeof body.include === 'string' && body.include !== '' ? body.include : null;
+        const names = archived.map((item) => path.basename(String(item.absPath ?? item.name ?? '')));
+        const isDir = stat.isDirectory();
+        // A single deliverable in a folder: remember the folder plus its file
+        // type, so the next run's fresh file of the same kind is picked up and
+        // its intermediate siblings are not.
+        const ruleRoot = isDir ? absTarget : path.dirname(absTarget);
         await this.saveRule({
-          root: absTarget,
-          kind: stat.isDirectory() ? 'dir' : 'file',
+          root: ruleRoot,
+          kind: 'dir',
           folder,
           tags,
-          include: typeof body.include === 'string' ? body.include : null,
-          depth: rememberDepth,
+          include: explicitInclude,
+          names,
+          depth: isDir ? rememberDepth : 1,
           sessionId,
           sessionTitle,
           cwd,
+          scheduled: body.scheduled,
         });
       }
       return { root: this.root, folder, archived, truncated, limit };
@@ -1840,7 +1912,7 @@ function buildArchiveTool(store) {
   return {
     name: 'materials_archive',
     description:
-      'File the files a task just produced into the materials library as references (the originals are not moved or copied). Point it at a folder or a single file. A path that is already in the library is refreshed (tags and folder) instead of being added again, so a scheduled task can call this on every run. 中文：把刚产出的文件或目录收进材料库，只记引用、原件不动；同一条路径重复归档只更新标签与所在文件夹，不会重复入库，定时任务可以每次都调用。',
+      'File the finished deliverable of a task into the materials library as a reference (the original is not moved or copied). Point it at the final output folder or the final file, not at scratch files. Inside a scheduled run, filing once also remembers the rule: the same file type in the same folder is filed automatically at the end of every later scheduled run, so a daily task only calls this once. Ordinary chat turns never start automatic filing. A path already in the library is refreshed (tags, folder) instead of being added twice. 中文：把任务的最终交付物收进材料库，只记引用、原件不动；指向最终成品或成品所在目录，不要指向过程草稿。在定时任务里收一次就会记住规则：同一目录、同一类文件此后每次定时跑完自动入库，日常任务只需调用一次；普通对话轮次不会自动收录。同一条路径重复归档只更新标签与所在文件夹，不会重复入库。',
     parameters: {
       type: 'object',
       properties: {
@@ -1897,6 +1969,7 @@ function buildArchiveTool(store) {
         cwd,
         sessionId: typeof session?.id === 'string' ? session.id : '',
         sessionTitle: typeof header.title === 'string' ? header.title : '',
+        scheduled: store.isScheduled(typeof session?.id === 'string' ? session.id : ''),
       });
     },
   };
@@ -1929,11 +2002,43 @@ export async function apply(ctx, config) {
   } else if (ctx.tools && typeof ctx.tools.register === 'function') {
     registerTool(ctx);
   }
+  const sessionsOf = () => (typeof ctx.get === 'function' ? ctx.get('sessions') : ctx.sessions);
+  /**
+   * Did a scheduled task start the current turn? The reminder the scheduler
+   * delivers is a user message that opens with the marker, so the newest user
+   * message of the session answers it. A human typing in the same session makes
+   * the newest message theirs, and then nothing files itself.
+   */
+  const isScheduledSession = (session) => {
+    try {
+      if (!session || typeof session.snapshotEvents !== 'function') return false;
+      const events = session.snapshotEvents();
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
+        if (!event || event.type !== 'user/message') continue;
+        return messageText(event.data).includes(SCHEDULE_MARK);
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+  store.scheduleProbe = (sessionId) => {
+    try {
+      const sessions = sessionsOf();
+      if (!sessions || typeof sessions.get !== 'function') return false;
+      return isScheduledSession(sessions.get(sessionId));
+    } catch {
+      return false;
+    }
+  };
   const lastRun = new Map();
   const onTurnStopping = (payload) => {
     const session = payload && payload.agent && payload.agent.session ? payload.agent.session : null;
     const sessionId = session && typeof session.id === 'string' ? session.id : '';
     if (sessionId === '') return;
+    // Automatic filing is for scheduled tasks only; a chat turn stays untouched.
+    if (!isScheduledSession(session)) return;
     const now = Date.now();
     const previous = lastRun.get(sessionId) ?? 0;
     if (now - previous < 3000) return;
