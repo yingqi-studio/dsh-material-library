@@ -578,16 +578,18 @@ class MaterialsStore {
   }
 
   /**
-   * Remember one manual filing as a recurring rule. Callers hold the queue.
+   * Remember one filing as a recurring rule. The filing is usually the human
+   * filing the first deliverable; the rule itself only ever runs at the end of a
+   * scheduled turn. Callers hold the queue.
    * A rule is skipped when it cannot mean "this session keeps producing it":
    * no session, a target already inside the library, or the session cwd itself.
    */
   async saveRule(input) {
     const sessionId = typeof input.sessionId === 'string' ? input.sessionId : '';
     if (sessionId === '') return null;
-    // Only a scheduled run may leave a standing rule behind: an ordinary chat
-    // turn must never turn the library into a dumping ground for its scratch work.
-    if (!this.isScheduled(sessionId, input.scheduled)) return null;
+    // A rule is born from a real filing — in practice the human filing the first
+    // deliverable of a task. It never fires in a chat turn; it only fires when a
+    // scheduled run of that same session ends (see onTurnStopping).
     const includeDerived = input.include === undefined || input.include === null || input.include === ''
       ? extensionPattern(input.names ?? [])
       : null;
@@ -671,10 +673,21 @@ class MaterialsStore {
    * Re-file everything the rules of one session point at. Runs after a turn
    * closes; unknown folders and vanished targets are skipped, never fatal.
    */
-  async runRules(sessionId) {
+  async runRules(sessionId, cwd) {
     const key = typeof sessionId === 'string' ? sessionId : '';
     if (key === '') return { sessionId: key, applied: [] };
-    const rules = (await this.readRules()).filter((rule) => rule.sessionId === key);
+    // A rule belongs to a place as much as to a session: the human may file the
+    // first deliverable from any chat, while the scheduled run that keeps
+    // producing it lives in another session that works in the same tree. So a
+    // rule also applies when its root sits inside the running session's cwd.
+    const base = typeof cwd === 'string' && cwd !== '' ? path.resolve(cwd) : '';
+    const inTree = (root) => {
+      if (base === '') return false;
+      const abs = path.resolve(root);
+      return abs === base || abs.startsWith(base + path.sep);
+    };
+    const rules = (await this.readRules())
+      .filter((rule) => rule.sessionId === key || inTree(rule.root));
     if (rules.length === 0) return { sessionId: key, applied: [] };
     const applied = [];
     for (const rule of rules) {
@@ -2067,8 +2080,9 @@ export async function apply(ctx, config) {
     const previous = lastRun.get(sessionId) ?? 0;
     if (now - previous < 3000) return;
     lastRun.set(sessionId, now);
+    const sessionCwd = session.header && typeof session.header.cwd === 'string' ? session.header.cwd : '';
     void store
-      .runRules(sessionId)
+      .runRules(sessionId, sessionCwd)
       .then((result) => {
         const added = result.applied.reduce((sum, item) => sum + (item.added ?? 0), 0);
         if (added > 0) ctx.logger.info('materials: auto-filed %d item(s) for %s', added, sessionId);
