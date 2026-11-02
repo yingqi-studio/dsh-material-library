@@ -33,6 +33,8 @@ const ICON_CACHE_DIR = path.join(os.tmpdir(), 'dsh-materials-icons');
 const HISTORY_DIR = '.history';
 const MAX_VERSIONS = 30;
 const MAX_IMPORT_FILES = 2000;
+const ARCHIVE_MAX_ENTRIES = 200;
+const ARCHIVE_DEFAULT_LIMIT = 50;
 
 const APP_DIRS = ['/Applications', '/System/Applications', path.join(HOME_ROOT, 'Applications'), '/System/Applications/Utilities'];
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.bmp', '.ico', '.avif']);
@@ -298,7 +300,32 @@ function excerptOf(text) {
   return flat.length > EXCERPT_CHARS ? `${flat.slice(0, EXCERPT_CHARS)}…` : flat;
 }
 
-/** Write a file through a sibling temp file so a crash cannot truncate it. */
+/** Expand `~` so a task prompt can name a home-relative folder. */
+function expandTarget(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (raw === '') return '';
+  if (raw === '~') return HOME_ROOT;
+  if (raw.startsWith('~/')) return path.join(HOME_ROOT, raw.slice(2));
+  return raw;
+}
+
+/** Turn `include` (".html, *.md") into filename matchers; `null` matches everything. */
+function parseIncludes(value) {
+  const raw = typeof value === 'string' ? value : '';
+  const patterns = raw.split(/[,;\s]+/).map((part) => part.trim()).filter(Boolean);
+  if (patterns.length === 0) return null;
+  return patterns.map((pattern) => {
+    const lower = pattern.toLowerCase();
+    if (!lower.includes('*')) return (name) => name.toLowerCase().endsWith(lower);
+    const source = lower
+      .split('*')
+      .map((part) => part.replace(/[.+^${}()|[\]\\]/g, '\\$&'))
+      .join('.*');
+    const rx = new RegExp(`^${source}$`);
+    return (name) => rx.test(name.toLowerCase());
+  });
+}
+
 /** Resolve one absolute path the picker may read: nothing outside the home folder. */
 function externalPath(value) {
   if (typeof value !== 'string' || value.trim() === '') throw new RequestError(400, 'path is required');
@@ -979,6 +1006,122 @@ class MaterialsStore {
     return { id: key, ...ref };
   }
 
+  /**
+   * File a file or a folder into the library as references (originals untouched).
+   * A path that is already in the library is refreshed in place instead of being
+   * added twice, so a scheduled task can call this on every single run.
+   */
+  archive(input) {
+    const body = input && typeof input === 'object' ? input : {};
+    return this.serialize(async () => {
+      await this.ensure();
+      const rawPath = expandTarget(body.path);
+      if (rawPath === '') throw new RequestError(400, 'path is required');
+      const absTarget = path.resolve(rawPath);
+      let stat;
+      try {
+        stat = await fsp.stat(absTarget);
+      } catch {
+        throw new RequestError(404, `no such file or folder: ${absTarget}`);
+      }
+      const folderRaw = body.folder === undefined || body.folder === null ? '' : String(body.folder);
+      const folder = folderRaw.trim() === '' ? '' : normalizeRel(folderRaw);
+      if (folder !== '') await fsp.mkdir(this.resolve(folder), { recursive: true });
+      const tags = normalizeTags(body.tags);
+      const include = parseIncludes(body.include);
+      const depth = Number.isInteger(body.depth) ? Math.max(0, Math.min(MAX_DEPTH, body.depth)) : 1;
+      const limit = Number.isInteger(body.limit) ? Math.max(1, Math.min(ARCHIVE_MAX_ENTRIES, body.limit)) : ARCHIVE_DEFAULT_LIMIT;
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      const sessionTitle = typeof body.sessionTitle === 'string' ? body.sessionTitle : '';
+      const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+
+      const targets = [];
+      let truncated = false;
+      if (stat.isDirectory() && depth > 0) {
+        const walk = async (dir, level) => {
+          let entries;
+          try {
+            entries = await fsp.readdir(dir, { withFileTypes: true });
+          } catch {
+            return;
+          }
+          entries.sort((a, b) => a.name.localeCompare(b.name));
+          for (const entry of entries) {
+            if (targets.length >= limit) {
+              truncated = true;
+              return;
+            }
+            if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              if (level < depth) await walk(full, level + 1);
+              continue;
+            }
+            if (!entry.isFile()) continue;
+            if (include !== null && !include.some((match) => match(entry.name))) continue;
+            targets.push(full);
+          }
+        };
+        await walk(absTarget, 1);
+      } else {
+        targets.push(absTarget);
+      }
+
+      const index = await this.readIndex();
+      const byPath = new Map();
+      for (const [id, entry] of Object.entries(index.refs)) {
+        if (entry && typeof entry.absPath === 'string') byPath.set(entry.absPath, id);
+      }
+
+      const archived = [];
+      for (const target of targets) {
+        const existingId = byPath.get(target);
+        if (existingId !== undefined) {
+          const entry = index.refs[existingId];
+          const current = Array.isArray(entry.tags) ? entry.tags : [];
+          const merged = normalizeTags([...current, ...tags]);
+          const changed = merged.length !== current.length || (folder !== '' && entry.folder !== folder);
+          if (merged.length !== current.length) entry.tags = merged;
+          if (folder !== '' && entry.folder !== folder) entry.folder = folder;
+          if (changed) entry.updatedAt = Date.now();
+          archived.push({ id: existingId, absPath: target, name: entry.name, kind: entry.kind, folder: entry.folder, tags: entry.tags ?? [], added: false });
+          continue;
+        }
+        let targetStat;
+        try {
+          targetStat = await fsp.stat(target);
+        } catch {
+          continue;
+        }
+        const kind = targetStat.isDirectory() ? 'dir' : 'file';
+        const id = `ref-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const counts = kind === 'dir' ? await countTree(target) : { files: 1, folders: 0 };
+        const fallback = path.basename(target) || 'reference';
+        const name = sanitizeName(targets.length === 1 ? body.name : undefined, fallback);
+        const relPath = cwd !== '' && (target === cwd || target.startsWith(cwd + path.sep))
+          ? path.relative(cwd, target)
+          : path.basename(target);
+        index.refs[id] = {
+          name,
+          folder,
+          tags,
+          kind,
+          sessionId,
+          sessionTitle,
+          cwd,
+          absPath: target,
+          relPath,
+          createdAt: Date.now(),
+          counts,
+        };
+        byPath.set(target, id);
+        archived.push({ id, absPath: target, name, kind, folder, tags, added: true });
+      }
+      await this.writeIndex(index);
+      return { root: this.root, folder, archived, truncated, limit };
+    });
+  }
+
   updateRef(input) {
     const body = input && typeof input === 'object' ? input : {};
     return this.serialize(async () => {
@@ -1427,6 +1570,11 @@ async function handle(request, response, store) {
         sendJson(response, 200, { ok: true, ...imported });
         return;
       }
+      case '/archive': {
+        const archived = await store.archive(body);
+        sendJson(response, 200, { ok: true, ...archived });
+        return;
+      }
       case '/ref/copy': {
         const refund = await store.readRefEntry(body.id);
         const imported = await store.importPath({
@@ -1456,8 +1604,94 @@ async function handle(request, response, store) {
   }
 }
 
+/** One line per archived entry, for the agent to read back. */
+function renderArchive(result) {
+  const entries = Array.isArray(result?.archived) ? result.archived : [];
+  if (entries.length === 0) return 'Nothing matched, so the library is unchanged.';
+  const added = entries.filter((entry) => entry.added).length;
+  const refreshed = entries.length - added;
+  const lines = [`Filed ${entries.length} reference(s) into the materials library: ${added} new, ${refreshed} refreshed.`];
+  for (const entry of entries) {
+    const where = entry.folder === '' ? 'root' : entry.folder;
+    lines.push(`- ${entry.name} — ${entry.kind === 'dir' ? 'folder' : 'file'} in ${where}${entry.added ? '' : ' (already filed)'} → ${entry.absPath}`);
+  }
+  if (result?.truncated) lines.push(`Stopped at the limit of ${result.limit}; raise limit or narrow include to file the rest.`);
+  lines.push('The originals were not moved or copied. Library root: ' + result.root);
+  return lines.join('\n');
+}
+
 /**
- * Register the library route.
+ * The agent-facing tool: file what a task just produced into the library.
+ * Reference entries only — the files stay exactly where they are.
+ */
+function buildArchiveTool(store) {
+  return {
+    name: 'materials_archive',
+    description:
+      'File the files a task just produced into the materials library as references (the originals are not moved or copied). Point it at a folder or a single file. A path that is already in the library is refreshed (tags and folder) instead of being added again, so a scheduled task can call this on every run. 中文：把刚产出的文件或目录收进材料库，只记引用、原件不动；同一条路径重复归档只更新标签与所在文件夹，不会重复入库，定时任务可以每次都调用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: "File or folder to file. Supports ~. A relative path resolves against this session's working directory. Omitted: the working directory itself.",
+        },
+        folder: {
+          type: 'string',
+          description: 'Library folder to file them under, e.g. "日报/2026-11". Omitted or empty: the library root.',
+        },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Tags to attach, e.g. ["日报","v2ex"]. Tags already on a filed entry are kept and merged with these.',
+        },
+        depth: {
+          type: 'integer',
+          description: 'How deep to walk when path is a folder. 1 (default) files the files directly inside it; 0 files the folder itself as one entry; up to 12.',
+        },
+        include: {
+          type: 'string',
+          description: 'Only names matching these, comma separated, e.g. ".html,.md" or "*.png". Omitted: every file.',
+        },
+        limit: {
+          type: 'integer',
+          description: 'Stop after this many entries (default 50, max 200).',
+        },
+        name: {
+          type: 'string',
+          description: 'Entry name when exactly one file or folder is filed. Omitted: its own file name.',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: renderArchive(value) }],
+    },
+    async execute(args, exec) {
+      const session = exec?.agent?.session;
+      const header = session?.header ?? {};
+      const cwd = typeof header.cwd === 'string' && header.cwd !== '' ? header.cwd : process.cwd();
+      const requested = expandTarget(args?.path);
+      const target = requested === '' ? cwd : path.isAbsolute(requested) ? requested : path.resolve(cwd, requested);
+      return store.archive({
+        path: target,
+        folder: args?.folder,
+        tags: args?.tags,
+        depth: args?.depth,
+        include: args?.include,
+        limit: args?.limit,
+        name: args?.name,
+        cwd,
+        sessionId: typeof session?.id === 'string' ? session.id : '',
+        sessionTitle: typeof header.title === 'string' ? header.title : '',
+      });
+    },
+  };
+}
+
+/**
+ * Register the library route and the archive tool.
  * @param ctx - host context carrying the web server.
  * @param config - bundle config; only `root` is read.
  */
@@ -1472,5 +1706,16 @@ export async function apply(ctx, config) {
     });
     return () => dispose();
   }, 'materials.route');
+  const registerTool = (host) => {
+    host.effect(() => {
+      const dispose = host.tools.register(buildArchiveTool(store));
+      return () => dispose();
+    }, 'materials.archive-tool');
+  };
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['tools'], registerTool);
+  } else if (ctx.tools && typeof ctx.tools.register === 'function') {
+    registerTool(ctx);
+  }
   ctx.logger.info('materials: library at %s', store.root);
 }
