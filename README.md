@@ -111,7 +111,8 @@ materials_archive(path="out/", folder="日报", tags=["日报"])   # first run, 
 ```
 
 - **Scheduled runs only.** Automatic filing never starts from an ordinary chat turn: a chat turn ends with nothing filed. The trigger is checked per turn — the turn has to be one a scheduled task started (its user message carries the schedule reminder).
-- **Deliverable, not scratch.** A rule remembers *which file type* was filed: file `out/2026-11-02.html` and the rule watches `out/` for `.html` only, so the run's intermediate `.json`/`.log`/`.tmp`/screenshot files stay out of the library. Filing a single file remembers its folder plus its type.
+- **Deliverable, not scratch.** Point it at a folder and only the documents are filed — pdf, word, excel, ppt, html, markdown, csv and friends (`.json`, `.log`, `.tmp`, screenshots and dotfiles stay on disk). A folder with no document at all falls back to filing everything, so a task whose product really is a `.json` is not silently emptied. Pass `include` to override.
+- A rule remembers *which file types* were filed: file `out/2026-11-02.html` and the rule watches `out/` for `.html` only. Filing a single file remembers its folder plus its type.
 - Filing a folder with a mix of four file types leaves **no rule** (that folder is not one deliverable); filing the working directory itself never becomes a rule either.
 - Keyed by session + folder + type, so filing the same folder again only extends its tags. Depth is capped at 3, one run files at most 50 entries.
 - The panel lists them under **自动归档** in the left pane; hover a row and click × to stop one.
@@ -142,7 +143,8 @@ materials_archive(path="out/", folder="日报", tags=["日报"])   # first run, 
 - **历史版本**：每次保存都把上一版留在 `.history/`（每个文件最多 30 份）；右栏头部「历史版本」→ 选中看正文 → 「恢复这个版本」。恢复前会先给当前内容拍一份快照，所以恢复本身也能撤回。
 - **收进库**：引用型条目可以复制成库里的真实文件，原件不动。
 - **导入**：`/import` 把 home 目录里的一个文件或一整个目录复制进库（单次上限 2000 个文件）。
-- **自动归档规则（只对定时任务生效）**：在**定时任务**里手动收过一次，材料库就把这次收录记成规则——只记「哪个目录 + 哪种文件类型」（收的是 `日报.html`，就只盯 `.html`），此后的每次定时运行结束自动把新出的同类成品收进来，过程文件（`.json`/`.log`/`.tmp`/截图）不进库。普通对话轮次**不会**自动收录，只有这一次的手动动作。左栏「自动归档」可看到规则，悬停点 × 即停。
+- **只收文档类成品**：指向一个目录时，默认只收 pdf / word / excel / ppt / html / markdown / csv 这类成品，过程文件（`.json`/`.log`/`.tmp`/截图/`.` 开头）留在原处；目录里一个文档都没有时退回全收（产物本来就是 `.json` 的任务不会被清空）。显式给 `include` 可覆盖。
+- **自动归档规则（只对定时任务生效）**：在**定时任务**里手动收过一次，材料库就把这次收录记成规则——只记「哪个目录 + 哪几种文件类型」（收的是 `日报.html`，就只盯 `.html`），此后的每次定时运行结束自动把新出的同类成品收进来。普通对话轮次**不会**自动收录，只有这一次的手动动作。左栏「自动归档」可看到规则，悬停点 × 即停。
 - **给 agent 的工具 `materials_archive`**：定时任务可以把最终成品收进库。任务 prompt 末尾加一句「跑完把 out/ 里最终成品收进材料库，folder 用日报/当月，tags 用 ["日报"]」即可；收过一次后同类文件以后自动进来，不必每次写。同一条路径重复归档只更新标签与文件夹，不会重复入库，原件不动。
 
 安装：`dsh plugin --profile <profile> add dsh-material-library`（未发布 npm 时用 `github:yingqi-studio/dsh-material-library`）。

@@ -39,7 +39,18 @@ const RULES_NAME = '.rules.json';
 const MAX_RULES = 200;
 const AUTO_ARCHIVE_LIMIT = 50;
 const AUTO_RULE_DEPTH = 3;
-const MAX_RULE_EXTENSIONS = 4;
+const MAX_RULE_EXTENSIONS = 6;
+/**
+ * What counts as a finished deliverable. Point a task at its output folder and
+ * only these are filed; the run's own scratch work (json, logs, screenshots) is
+ * left on disk. A folder with none of them falls back to filing everything, so a
+ * task whose product really is a `.json` is not silently emptied.
+ */
+const DELIVERABLE_EXTENSIONS = new Set([
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.csv', '.ppt', '.pptx',
+  '.html', '.htm', '.md', '.markdown', '.txt', '.rtf', '.epub', '.pages',
+  '.numbers', '.key', '.odt', '.ods', '.odp',
+]);
 const SCHEDULE_MARK = '[SCHEDULE REMINDER';
 /** Transient files a task writes on the way to its real output. */
 const JUNK_EXTENSIONS = new Set(['.tmp', '.temp', '.log', '.bak', '.swp', '.part', '.crdownload', '.ds_store']);
@@ -1314,6 +1325,18 @@ class MaterialsStore {
         targets.push(absTarget);
       }
 
+      // No explicit filter: keep the finished documents and drop the run's
+      // scratch files, unless the folder holds no document at all.
+      let skipped = 0;
+      if (include === null && stat.isDirectory() && targets.length > 0) {
+        const deliverables = targets.filter((target) => DELIVERABLE_EXTENSIONS.has(path.extname(target).toLowerCase()));
+        if (deliverables.length > 0 && deliverables.length < targets.length) {
+          skipped = targets.length - deliverables.length;
+          targets.length = 0;
+          targets.push(...deliverables);
+        }
+      }
+
       const index = await this.readIndex();
       const byPath = new Map();
       for (const [id, entry] of Object.entries(index.refs)) {
@@ -1388,7 +1411,7 @@ class MaterialsStore {
           scheduled: body.scheduled,
         });
       }
-      return { root: this.root, folder, archived, truncated, limit };
+      return { root: this.root, folder, archived, truncated, limit, skipped };
     }
   }
 
@@ -1899,6 +1922,7 @@ function renderArchive(result) {
     const where = entry.folder === '' ? 'root' : entry.folder;
     lines.push(`- ${entry.name} — ${entry.kind === 'dir' ? 'folder' : 'file'} in ${where}${entry.added ? '' : ' (already filed)'} → ${entry.absPath}`);
   }
+  if (result?.skipped) lines.push(`Left ${result.skipped} scratch file(s) out (no document type); pass include to file them too.`);
   if (result?.truncated) lines.push(`Stopped at the limit of ${result.limit}; raise limit or narrow include to file the rest.`);
   lines.push('The originals were not moved or copied. Library root: ' + result.root);
   return lines.join('\n');
@@ -1912,7 +1936,7 @@ function buildArchiveTool(store) {
   return {
     name: 'materials_archive',
     description:
-      'File the finished deliverable of a task into the materials library as a reference (the original is not moved or copied). Point it at the final output folder or the final file, not at scratch files. Inside a scheduled run, filing once also remembers the rule: the same file type in the same folder is filed automatically at the end of every later scheduled run, so a daily task only calls this once. Ordinary chat turns never start automatic filing. A path already in the library is refreshed (tags, folder) instead of being added twice. 中文：把任务的最终交付物收进材料库，只记引用、原件不动；指向最终成品或成品所在目录，不要指向过程草稿。在定时任务里收一次就会记住规则：同一目录、同一类文件此后每次定时跑完自动入库，日常任务只需调用一次；普通对话轮次不会自动收录。同一条路径重复归档只更新标签与所在文件夹，不会重复入库。',
+      'File the finished deliverable of a task into the materials library as a reference (the original is not moved or copied). Point it at the final output folder or the final file. A folder is filed by its documents (pdf, word, excel, ppt, html, markdown, csv, …) and the run\'s scratch files are left out unless you pass include. Inside a scheduled run, filing once also remembers the rule: the same document types in the same folder are filed automatically at the end of every later scheduled run, so a daily task only calls this once. Ordinary chat turns never start automatic filing. A path already in the library is refreshed (tags, folder) instead of being added twice. 中文：把任务的最终交付物收进材料库，只记引用、原件不动；指向最终成品或成品所在目录。默认只收文档类文件（pdf/word/excel/ppt/html/markdown/csv 等），过程产物（json/log/截图）除非显式给 include 否则不收。在定时任务里收一次就会记住规则：同一目录里同样那几种文件，此后每次定时跑完自动入库，日常任务只需调用一次；普通对话轮次不会自动收录。同一条路径重复归档只更新标签与所在文件夹，不会重复入库。',
     parameters: {
       type: 'object',
       properties: {
@@ -1935,7 +1959,7 @@ function buildArchiveTool(store) {
         },
         include: {
           type: 'string',
-          description: 'Only names matching these, comma separated, e.g. ".html,.md" or "*.png". Omitted: every file.',
+          description: 'Only names matching these, comma separated, e.g. ".html,.md" or "*.png". Omitted: only documents (pdf/doc/xls/ppt/html/md/csv…), or every file when the folder has none.',
         },
         limit: {
           type: 'integer',
