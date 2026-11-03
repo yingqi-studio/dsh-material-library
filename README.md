@@ -119,7 +119,7 @@ materials_archive(path="out/", folder="日报", tags=["日报"])   # first run, 
 - A rule remembers *which file types* were filed: file `out/2026-11-02.html` and the rule watches `out/` for `.html` only. Filing a single file remembers its folder plus its type.
 - Filing a folder with a mix of four file types leaves **no rule** (that folder is not one deliverable); filing the working directory itself never becomes a rule either.
 - Keyed by session + folder + type, so filing the same folder again only extends its tags. Depth is capped at 3, one run files at most 50 entries.
-- The panel lists them under **自动归档** in the left pane; hover a row and click × to stop one.
+- The panel lists them under **自动归档** in the left pane. The number on a row is how many entries that folder holds right now; an orange dot means a scheduled run came back empty and the rule is waiting for the next re-run. Hover a row and click × to stop one.
 - Rules live in `.rules.json` at the library root; a target that disappeared is skipped, not fatal.
 - Filing in a chat works and files exactly what you point at; it also creates the rule, which then waits for the next scheduled run of that folder.
 
@@ -149,10 +149,33 @@ materials_archive(path="out/", folder="日报", tags=["日报"])   # first run, 
 - **导入**：`/import` 把 home 目录里的一个文件或一整个目录复制进库（单次上限 2000 个文件）。
 - **只收文档类成品**：指向一个目录时，默认只收 pdf / word / excel / ppt / html / markdown / csv 这类成品，过程文件（`.json`/`.log`/`.tmp`/截图/`.` 开头）留在原处；目录里一个文档都没有时退回全收（产物本来就是 `.json` 的任务不会被清空）。显式给 `include` 可覆盖。
 - **定时失败也不会丢**：定时那一轮如果什么都没产出，规则会挂一天的「待补收」；之后在这个目录里跑的任何一轮（通常是你手动重跑那条任务）都会把新出的成品补进来。普通对话轮次本身仍然什么都不收。
+- **左栏「自动归档」怎么读**：每行是「目录 → 库内文件夹」，右侧数字是**这个文件夹现在有几条**；圆点变橙色说明上一次定时跑空了、正等重跑补收。悬停点 × 即停。
 - **自动归档规则**：你**手动**收过一次，材料库就把这次收录记成规则——只记「哪个目录 + 哪几种文件类型」（收的是 `日报.html`，就只盯 `.html`）。没有人手动收过，就什么都不记。规则只在该目录所属的**定时任务**跑完时触发，把新出的同类成品自动收进来；普通对话轮次结束**不会**自动收录。规则跟着目录走，所以第一次在哪个对话里收的都无所谓。左栏「自动归档」可看到规则，悬停点 × 即停。
 - **给 agent 的工具 `materials_archive`**：定时任务可以把最终成品收进库。任务 prompt 末尾加一句「跑完把 out/ 里最终成品收进材料库，folder 用日报/当月，tags 用 ["日报"]」即可；收过一次后同类文件以后自动进来，不必每次写。同一条路径重复归档只更新标签与文件夹，不会重复入库，原件不动。
 
-安装：`dsh plugin --profile <profile> add dsh-material-library`（未发布 npm 时用 `github:yingqi-studio/dsh-material-library`）。
+安装：`dsh plugin --profile <profile> add dsh-material-library`（已发布在 [npm](https://www.npmjs.com/package/dsh-material-library)；也可以 `github:yingqi-studio/dsh-material-library` 从仓库装）。
+
+## Changelog
+
+- **1.4.4** — the 自动归档 row shows how many entries its folder holds now (not the last run's count); an orange dot marks a rule waiting for a re-run.
+- **1.4.3** — a scheduled run that ends empty arms its rule for one catch-up pass, so re-running a failed task still files its output.
+- **1.4.2** — the scheduled turn is now spotted behind the harness's own runtime note; rules follow folder renames and deletion, and a catch-up run only sees files newer than the last one.
+- **1.4.1** — a rule is born from a filing (usually the human's first one) and follows the folder, not the chat.
+- **1.4.0** — folder filings default to documents only; scratch files stay on disk.
+- **1.3.x** — auto-filing rules: file a folder once, it keeps filing (scheduled turns only).
+- **1.2.0** — the `materials_archive` agent tool.
+- **1.1.x** — version history, copy-into-library, import a tree.
+
+## 更新记录
+
+- **1.4.4** — 左栏「自动归档」每行的数字改成「该文件夹现在有几条」，橙色圆点表示等在重跑后补收。
+- **1.4.3** — 定时那一轮跑空时挂起规则，重跑同一条任务也会把产出收进来。
+- **1.4.2** — 修正「定时轮次识别」（真实触发消息后面还跟着一条运行时注记）；规则跟着文件夹改名/删除走；补收只收比上次归档新的文件。
+- **1.4.1** — 规则由一次真实收录产生（通常是你手动收的第一次），跟着目录走。
+- **1.4.0** — 目录归档默认只收文档类成品，过程文件留在原处。
+- **1.3.x** — 自动归档规则：手动收过一次，定时任务以后自动收同类成品。
+- **1.2.0** — agent 工具 `materials_archive`。
+- **1.1.x** — 历史版本、收进库、导入目录。
 
 ## License
 
