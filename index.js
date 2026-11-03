@@ -39,6 +39,10 @@ const RULES_NAME = '.rules.json';
 const MAX_RULES = 200;
 const AUTO_ARCHIVE_LIMIT = 50;
 const AUTO_RULE_DEPTH = 3;
+/** How long an empty scheduled run keeps its rule armed for a catch-up pass. */
+const CATCHUP_MAX_AGE = 24 * 60 * 60 * 1000;
+/** Don't scan the same folder on every chat turn while waiting for output. */
+const CATCHUP_MIN_GAP = 5 * 60 * 1000;
 const MAX_RULE_EXTENSIONS = 6;
 /**
  * What counts as a finished deliverable. Point a task at its output folder and
@@ -389,6 +393,10 @@ function normalizeRules(raw) {
       createdAt: typeof rule.createdAt === 'number' ? rule.createdAt : 0,
       lastRunAt: typeof rule.lastRunAt === 'number' ? rule.lastRunAt : 0,
       lastCount: typeof rule.lastCount === 'number' ? rule.lastCount : 0,
+      // A scheduled run that produced nothing arms the rule for one catch-up
+      // pass, so a failed task's output is still filed when it is re-run later.
+      pendingAt: typeof rule.pendingAt === 'number' ? rule.pendingAt : 0,
+      attemptAt: typeof rule.attemptAt === 'number' ? rule.attemptAt : 0,
     });
   }
   return out;
@@ -632,6 +640,8 @@ class MaterialsStore {
       createdAt: Date.now(),
       lastRunAt: 0,
       lastCount: 0,
+      pendingAt: 0,
+      attemptAt: 0,
     };
     rules.push(rule);
     await this.writeRules(rules);
@@ -673,9 +683,10 @@ class MaterialsStore {
    * Re-file everything the rules of one session point at. Runs after a turn
    * closes; unknown folders and vanished targets are skipped, never fatal.
    */
-  async runRules(sessionId, cwd) {
+  async runRules(sessionId, cwd, options = {}) {
     const key = typeof sessionId === 'string' ? sessionId : '';
-    if (key === '') return { sessionId: key, applied: [] };
+    const mode = options.mode === 'catchup' ? 'catchup' : 'scheduled';
+    if (key === '') return { sessionId: key, mode, applied: [] };
     // A rule belongs to a place as much as to a session: the human may file the
     // first deliverable from any chat, while the scheduled run that keeps
     // producing it lives in another session that works in the same tree. So a
@@ -686,9 +697,17 @@ class MaterialsStore {
       const abs = path.resolve(root);
       return abs === base || abs.startsWith(base + path.sep);
     };
-    const rules = (await this.readRules())
+    const now = Date.now();
+    let rules = (await this.readRules())
       .filter((rule) => rule.sessionId === key || inTree(rule.root));
-    if (rules.length === 0) return { sessionId: key, applied: [] };
+    if (mode === 'catchup') {
+      // Only rules whose scheduled run came back empty, and only for a day —
+      // a chat turn picks the pile up once, it does not file forever.
+      rules = rules.filter((rule) => rule.pendingAt > 0
+        && now - rule.pendingAt < CATCHUP_MAX_AGE
+        && now - rule.attemptAt >= CATCHUP_MIN_GAP);
+    }
+    if (rules.length === 0) return { sessionId: key, mode, applied: [] };
     const applied = [];
     for (const rule of rules) {
       try {
@@ -709,13 +728,30 @@ class MaterialsStore {
         applied.push({ rule: rule.id, root: rule.root, added, total: result.archived.length });
         rule.lastRunAt = Date.now();
         rule.lastCount = result.archived.length;
+        if (added > 0) {
+          rule.pendingAt = 0;
+          rule.attemptAt = 0;
+        } else if (mode === 'scheduled') {
+          // Nothing came out of the scheduled run: arm one catch-up so the
+          // human's re-run of the same task still ends up in the library.
+          rule.pendingAt = Date.now();
+          rule.attemptAt = 0;
+        } else {
+          rule.attemptAt = Date.now();
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         applied.push({ rule: rule.id, root: rule.root, added: 0, error: message });
+        if (mode === 'scheduled') {
+          rule.pendingAt = Date.now();
+          rule.attemptAt = 0;
+        } else {
+          rule.attemptAt = Date.now();
+        }
       }
     }
     await this.serialize(() => this.writeRules(rules));
-    return { sessionId: key, applied };
+    return { sessionId: key, mode, applied };
   }
 
   /** Tags for one material, from the index. */
@@ -1917,7 +1953,7 @@ async function handle(request, response, store) {
         return;
       }
       case '/rules/run': {
-        const ran = await store.runRules(body.sessionId);
+        const ran = await store.runRules(body.sessionId, body.cwd, { mode: body.mode });
         sendJson(response, 200, { ok: true, ...ran });
         return;
       }
@@ -2118,18 +2154,20 @@ export async function apply(ctx, config) {
     const session = payload && payload.agent && payload.agent.session ? payload.agent.session : null;
     const sessionId = session && typeof session.id === 'string' ? session.id : '';
     if (sessionId === '') return;
-    // Automatic filing is for scheduled tasks only; a chat turn stays untouched.
-    if (!isScheduledSession(session)) return;
+    // A scheduled turn files its own output. Any other turn only picks up what a
+    // scheduled run that came back empty left behind — the human's re-run of a
+    // failed task is filed too, but a normal chat turn still files nothing new.
+    const scheduled = isScheduledSession(session);
     const now = Date.now();
     const previous = lastRun.get(sessionId) ?? 0;
     if (now - previous < 3000) return;
     lastRun.set(sessionId, now);
     const sessionCwd = session.header && typeof session.header.cwd === 'string' ? session.header.cwd : '';
     void store
-      .runRules(sessionId, sessionCwd)
+      .runRules(sessionId, sessionCwd, { mode: scheduled ? 'scheduled' : 'catchup' })
       .then((result) => {
         const added = result.applied.reduce((sum, item) => sum + (item.added ?? 0), 0);
-        if (added > 0) ctx.logger.info('materials: auto-filed %d item(s) for %s', added, sessionId);
+        if (added > 0) ctx.logger.info('materials: %s filed %d item(s) for %s', result.mode, added, sessionId);
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
