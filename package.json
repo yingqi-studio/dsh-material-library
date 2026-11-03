@@ -1,6 +1,6 @@
 {
   "name": "dsh-material-library",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "private": false,
   "type": "module",
   "description": "Material library for DeepSeek Harness: collect folders, files and notes from a conversation, organize them in real folders with tags, and reopen a chat's output in one click.",

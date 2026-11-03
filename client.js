@@ -59,6 +59,7 @@ window.__ModuleLoader__.load({
       delete: '删除',
       deleteFolder: '删除文件夹',
       autoRules: '自动归档',
+      rulePending: '有一个定时任务这轮没产出，等你重跑后自动补收',
       stopAutoRule: '不再自动归档',
       confirmDelete: '确认删除',
       confirmDeleteFolder: '确认删除文件夹',
@@ -170,6 +171,7 @@ window.__ModuleLoader__.load({
       delete: 'Delete',
       deleteFolder: 'Delete folder',
       autoRules: 'Auto-filed',
+      rulePending: 'a scheduled run came back empty — the next run of this task is filed automatically',
       stopAutoRule: 'Stop auto-filing',
       confirmDelete: 'Confirm delete',
       confirmDeleteFolder: 'Confirm folder delete',
@@ -438,6 +440,7 @@ window.__ModuleLoader__.load({
 .fdr-nav-count { flex:0 0 auto; font-size:11px; color:var(--dsw-alias-label-secondary); font-variant-numeric:tabular-nums; }
 .fdr-nav-rule { cursor:default; }
 .fdr-nav-rule:hover { background:var(--dsw-alias-bg-layer-2); }
+.fdr-nav-rule-pending .fdr-nav-dot { background:#f0a020; opacity:1; }
 .fdr-nav-rule:hover .fdr-row-ops { display:flex; }
 .fdr-nav-dot { flex:0 0 auto; width:7px; height:7px; margin:0 3px; border-radius:50%; background:var(--dsw-alias-label-secondary); opacity:.45; }
 .fdr-twisty { flex:0 0 auto; width:10px; font-size:9px; line-height:1; color:var(--dsw-alias-label-secondary); cursor:default; }
@@ -1825,6 +1828,20 @@ window.__ModuleLoader__.load({
 
       const selectedDir = trail[at] === undefined ? '' : trail[at];
 
+      /* What a rule's folder holds right now — not what its last run added. */
+      const countInFolder = (folder) => {
+        const all = [
+          ...((snapshot && snapshot.refs) || []),
+          ...((snapshot && snapshot.files) || []),
+        ];
+        const target = folder || '';
+        return all.filter((item) => {
+          const where = item && typeof item.folder === 'string' ? item.folder : '';
+          if (target === '') return where === '';
+          return where === target || where.startsWith(`${target}/`);
+        }).length;
+      };
+
       const refresh = useCallback(async () => {
         try {
           let next = null;
@@ -2466,10 +2483,14 @@ window.__ModuleLoader__.load({
           rules.map((rule) =>
             h(
               'div',
-              { key: rule.id, className: 'fdr-nav fdr-nav-rule', title: `${rule.root} — ${rule.folder || t('root')}` },
+              {
+                key: rule.id,
+                className: `fdr-nav fdr-nav-rule${rule.pendingAt > 0 ? ' fdr-nav-rule-pending' : ''}`,
+                title: `${rule.root} → ${rule.folder || t('root')}${rule.pendingAt > 0 ? ` · ${t('rulePending')}` : ''}`,
+              },
               h('span', { className: 'fdr-nav-dot' }),
               h('span', { className: 'fdr-nav-name' }, rule.root.split('/').filter(Boolean).slice(-1)[0] || rule.root),
-              h('span', { className: 'fdr-nav-count' }, String(rule.lastCount || 0)),
+              h('span', { className: 'fdr-nav-count' }, String(countInFolder(rule.folder))),
               h(
                 'span',
                 { className: 'fdr-row-ops' },
