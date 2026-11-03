@@ -702,6 +702,7 @@ class MaterialsStore {
           sessionTitle: rule.sessionTitle,
           cwd: rule.cwd,
           limit: AUTO_ARCHIVE_LIMIT,
+          since: rule.lastRunAt > 0 ? rule.lastRunAt : rule.createdAt,
           remember: false,
         }));
         const added = result.archived.filter((item) => item.added === true).length;
@@ -1110,6 +1111,10 @@ class MaterialsStore {
         }
       }
       if (touched) await this.writeIndex(index);
+      // Rules that filed into this folder have nowhere to file now.
+      const rules = await this.readRules();
+      const kept = rules.filter((rule) => rule.folder !== normalized);
+      if (kept.length !== rules.length) await this.writeRules(kept);
       return { path: normalized };
     });
   }
@@ -1155,6 +1160,16 @@ class MaterialsStore {
         else if (folder.startsWith(fromPrefix)) ref.folder = `${to}${folder.slice(from.length)}`;
       }
       await this.writeIndex(index);
+      // An auto-filing rule files into a folder by name; renaming the folder has
+      // to carry the rule with it, or the next run files into a folder nobody sees.
+      const rules = await this.readRules();
+      let touched = false;
+      for (const rule of rules) {
+        const folder = String(rule.folder ?? '');
+        if (folder === from) { rule.folder = to; touched = true; }
+        else if (folder.startsWith(fromPrefix)) { rule.folder = `${to}${folder.slice(from.length)}`; touched = true; }
+      }
+      if (touched) await this.writeRules(rules);
       return { path: to, previous: from };
     });
   }
@@ -1304,6 +1319,9 @@ class MaterialsStore {
       const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
       const sessionTitle = typeof body.sessionTitle === 'string' ? body.sessionTitle : '';
       const cwd = typeof body.cwd === 'string' ? body.cwd : '';
+      // A rule that has never fired yet only wants what was produced after it
+      // was made — otherwise its first pass would drag the whole backlog in.
+      const since = Number.isFinite(body.since) && body.since > 0 ? body.since : 0;
 
       const targets = [];
       let truncated = false;
@@ -1330,6 +1348,14 @@ class MaterialsStore {
             }
             if (!entry.isFile()) continue;
             if (include !== null && !include.some((match) => match(entry.name))) continue;
+            if (since > 0) {
+              try {
+                const info = await fsp.stat(full);
+                if (info.mtimeMs < since) continue;
+              } catch {
+                continue;
+              }
+            }
             targets.push(full);
           }
         };
@@ -2046,16 +2072,34 @@ export async function apply(ctx, config) {
    * message of the session answers it. A human typing in the same session makes
    * the newest message theirs, and then nothing files itself.
    */
+  // A scheduled turn carries the reminder as a user message, but the harness
+  // appends its own "Time sampled while preparing turn ..." message after it.
+  // So the turn is defined by the *last* runtime marker, and everything a user
+  // message says from there on is what started it.
+  const TURN_MARK = 'Time sampled while preparing turn';
+  const SCHEDULE_MARKS = [SCHEDULE_MARK, 'This is a scheduled message from the user', 'schedule_id_json'];
+  const isScheduledText = (text) => SCHEDULE_MARKS.some((mark) => text.includes(mark));
   const isScheduledSession = (session) => {
     try {
       if (!session || typeof session.snapshotEvents !== 'function') return false;
       const events = session.snapshotEvents();
-      for (let index = events.length - 1; index >= 0; index -= 1) {
-        const event = events[index];
+      const users = [];
+      for (const event of events) {
         if (!event || event.type !== 'user/message') continue;
-        return messageText(event.data).includes(SCHEDULE_MARK);
+        users.push(messageText(event.data));
       }
-      return false;
+      if (users.length === 0) return false;
+      // Each turn appends the harness's own runtime note as a user message, so
+      // the message that actually started the turn is the one just before the
+      // newest note. A reminder that arrived after the note is caught first.
+      const newest = users[users.length - 1];
+      if (!newest.includes(TURN_MARK) && isScheduledText(newest)) return true;
+      let marker = -1;
+      for (let index = users.length - 1; index >= 0; index -= 1) {
+        if (users[index].includes(TURN_MARK)) { marker = index; break; }
+      }
+      const trigger = marker > 0 ? users[marker - 1] : newest;
+      return isScheduledText(trigger);
     } catch {
       return false;
     }
